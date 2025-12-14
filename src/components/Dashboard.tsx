@@ -343,7 +343,7 @@ export function Dashboard() {
           </h3>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-            自动监测中 (5s)
+            自动监测中
           </div>
         </div>
         <div className="grid grid-cols-4 gap-4 text-sm">

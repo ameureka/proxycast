@@ -289,3 +289,28 @@ export interface ModelInfo {
 export async function getAvailableModels(): Promise<ModelInfo[]> {
   return invoke("get_available_models");
 }
+
+// ============ API Compatibility Check ============
+
+export interface ApiCheckResult {
+  model: string;
+  available: boolean;
+  status: number;
+  error_type: string | null;
+  error_message: string | null;
+  time_ms: number;
+}
+
+export interface ApiCompatibilityResult {
+  provider: string;
+  overall_status: string;
+  checked_at: string;
+  results: ApiCheckResult[];
+  warnings: string[];
+}
+
+export async function checkApiCompatibility(
+  provider: string,
+): Promise<ApiCompatibilityResult> {
+  return invoke("check_api_compatibility", { provider });
+}

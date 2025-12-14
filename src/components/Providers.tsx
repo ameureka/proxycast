@@ -122,7 +122,7 @@ export function Providers() {
   const [qwenLastSync, setQwenLastSync] = useState<Date | null>(null);
 
   // Last check time (used for display)
-  const [_lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
+  const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
 
   // OpenAI Custom state
   const [openaiStatus, setOpenaiStatus] = useState<OpenAICustomStatus | null>(
@@ -166,79 +166,101 @@ export function Providers() {
       await loadQwenStatus();
       await loadOpenAICustomStatus();
       await loadClaudeCustomStatus();
+
+      // Get initial hashes
       try {
-        kiroHashRef.current = await getTokenFileHash();
-        geminiHashRef.current = await getGeminiTokenFileHash();
-        qwenHashRef.current = await getQwenTokenFileHash();
+        const kiroHash = await getTokenFileHash();
+        const geminiHash = await getGeminiTokenFileHash();
+        const qwenHash = await getQwenTokenFileHash();
+        kiroHashRef.current = kiroHash;
+        geminiHashRef.current = geminiHash;
+        qwenHashRef.current = qwenHash;
+        console.log("[Init] Kiro hash:", kiroHash);
+        console.log("[Init] Gemini hash:", geminiHash);
+        console.log("[Init] Qwen hash:", qwenHash);
       } catch (e) {
         console.error("Failed to get initial hash:", e);
       }
     };
     init();
 
-    const interval = setInterval(checkFileChanges, 5000);
+    // Define checkFileChanges inside useEffect to avoid stale closure
+    const checkFiles = async () => {
+      const now = new Date();
+      setLastCheckTime(now);
+      console.log("[Check] Running file check at", now.toLocaleTimeString());
+
+      // Check Kiro
+      try {
+        console.log("[Check] Kiro current hash:", kiroHashRef.current);
+        const kiroResult = await checkAndReloadCredentials(kiroHashRef.current);
+        console.log("[Check] Kiro result:", kiroResult);
+
+        if (kiroResult.new_hash !== kiroHashRef.current) {
+          console.log(
+            "[Check] Kiro hash changed:",
+            kiroHashRef.current,
+            "->",
+            kiroResult.new_hash,
+          );
+        }
+        kiroHashRef.current = kiroResult.new_hash;
+
+        if (kiroResult.changed && kiroResult.reloaded) {
+          await loadKiroStatus();
+          setKiroLastSync(new Date());
+          setMessage({
+            type: "success",
+            text: "[Kiro] 检测到凭证文件变化，已自动重新加载",
+          });
+          setTimeout(() => setMessage(null), 5000);
+        }
+      } catch (e) {
+        console.error("Kiro check error:", e);
+      }
+
+      // Check Gemini
+      try {
+        const geminiResult = await checkAndReloadGeminiCredentials(
+          geminiHashRef.current,
+        );
+        geminiHashRef.current = geminiResult.new_hash;
+        if (geminiResult.changed && geminiResult.reloaded) {
+          await loadGeminiStatus();
+          setGeminiLastSync(new Date());
+          setMessage({
+            type: "success",
+            text: "[Gemini] 检测到凭证文件变化，已自动重新加载",
+          });
+          setTimeout(() => setMessage(null), 5000);
+        }
+      } catch (e) {
+        console.error("Gemini check error:", e);
+      }
+
+      // Check Qwen
+      try {
+        const qwenResult = await checkAndReloadQwenCredentials(
+          qwenHashRef.current,
+        );
+        qwenHashRef.current = qwenResult.new_hash;
+        if (qwenResult.changed && qwenResult.reloaded) {
+          await loadQwenStatus();
+          setQwenLastSync(new Date());
+          setMessage({
+            type: "success",
+            text: "[Qwen] 检测到凭证文件变化，已自动重新加载",
+          });
+          setTimeout(() => setMessage(null), 5000);
+        }
+      } catch (e) {
+        console.error("Qwen check error:", e);
+      }
+    };
+
+    const interval = setInterval(checkFiles, 5000);
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const checkFileChanges = async () => {
-    setLastCheckTime(new Date());
-
-    // Check Kiro
-    try {
-      const kiroResult = await checkAndReloadCredentials(kiroHashRef.current);
-      kiroHashRef.current = kiroResult.new_hash;
-      if (kiroResult.changed && kiroResult.reloaded) {
-        await loadKiroStatus();
-        setKiroLastSync(new Date());
-        setMessage({
-          type: "success",
-          text: "[Kiro] 检测到凭证文件变化，已自动重新加载",
-        });
-        setTimeout(() => setMessage(null), 5000);
-      }
-    } catch (e) {
-      console.error("Kiro check error:", e);
-    }
-
-    // Check Gemini
-    try {
-      const geminiResult = await checkAndReloadGeminiCredentials(
-        geminiHashRef.current,
-      );
-      geminiHashRef.current = geminiResult.new_hash;
-      if (geminiResult.changed && geminiResult.reloaded) {
-        await loadGeminiStatus();
-        setGeminiLastSync(new Date());
-        setMessage({
-          type: "success",
-          text: "[Gemini] 检测到凭证文件变化，已自动重新加载",
-        });
-        setTimeout(() => setMessage(null), 5000);
-      }
-    } catch (e) {
-      console.error("Gemini check error:", e);
-    }
-
-    // Check Qwen
-    try {
-      const qwenResult = await checkAndReloadQwenCredentials(
-        qwenHashRef.current,
-      );
-      qwenHashRef.current = qwenResult.new_hash;
-      if (qwenResult.changed && qwenResult.reloaded) {
-        await loadQwenStatus();
-        setQwenLastSync(new Date());
-        setMessage({
-          type: "success",
-          text: "[Qwen] 检测到凭证文件变化，已自动重新加载",
-        });
-        setTimeout(() => setMessage(null), 5000);
-      }
-    } catch (e) {
-      console.error("Qwen check error:", e);
-    }
-  };
 
   const loadKiroStatus = async () => {
     try {
@@ -557,9 +579,15 @@ export function Providers() {
                   {formatTime(kiroLastSync)}
                 </span>
               </span>
+              <span>
+                最后检测:{" "}
+                <span className="text-foreground">
+                  {formatTime(lastCheckTime)}
+                </span>
+              </span>
               <span className="flex items-center gap-1">
                 <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                监测中 (5s)
+                监测中
               </span>
             </div>
           </div>
@@ -634,9 +662,15 @@ export function Providers() {
                   {formatTime(geminiLastSync)}
                 </span>
               </span>
+              <span>
+                最后检测:{" "}
+                <span className="text-foreground">
+                  {formatTime(lastCheckTime)}
+                </span>
+              </span>
               <span className="flex items-center gap-1">
                 <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                监测中 (5s)
+                监测中
               </span>
             </div>
           </div>
@@ -714,9 +748,15 @@ export function Providers() {
                   {formatTime(qwenLastSync)}
                 </span>
               </span>
+              <span>
+                最后检测:{" "}
+                <span className="text-foreground">
+                  {formatTime(lastCheckTime)}
+                </span>
+              </span>
               <span className="flex items-center gap-1">
                 <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                监测中 (5s)
+                监测中
               </span>
             </div>
           </div>

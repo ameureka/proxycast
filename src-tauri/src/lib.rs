@@ -763,6 +763,168 @@ struct ModelInfo {
     owned_by: String,
 }
 
+// ============ API Compatibility Check ============
+
+#[derive(serde::Serialize)]
+struct ApiCheckResult {
+    model: String,
+    available: bool,
+    status: u16,
+    error_type: Option<String>,
+    error_message: Option<String>,
+    time_ms: u64,
+}
+
+#[derive(serde::Serialize)]
+struct ApiCompatibilityResult {
+    provider: String,
+    overall_status: String,
+    checked_at: String,
+    results: Vec<ApiCheckResult>,
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+async fn check_api_compatibility(
+    state: tauri::State<'_, AppState>,
+    logs: tauri::State<'_, LogState>,
+    provider: String,
+) -> Result<ApiCompatibilityResult, String> {
+    logs.write().await.add(
+        "info",
+        &format!("[API检测] 开始检测 {provider} API 兼容性..."),
+    );
+
+    let s = state.read().await;
+    let mut results: Vec<ApiCheckResult> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    let models_to_check = match provider.as_str() {
+        "kiro" => vec!["claude-sonnet-4-5", "claude-3-7-sonnet-20250219"],
+        "gemini" => vec!["gemini-2.5-flash", "gemini-2.5-pro"],
+        "qwen" => vec!["qwen3-coder-plus", "qwen3-coder-flash"],
+        _ => vec![],
+    };
+
+    for model in models_to_check {
+        let start = std::time::Instant::now();
+
+        // 构建简单的测试请求
+        let test_request = crate::models::openai::ChatCompletionRequest {
+            model: model.to_string(),
+            messages: vec![crate::models::openai::ChatMessage {
+                role: "user".to_string(),
+                content: Some(crate::models::openai::MessageContent::Text(
+                    "Hi".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            temperature: None,
+            max_tokens: Some(10),
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result = match provider.as_str() {
+            "kiro" => s.kiro_provider.call_api(&test_request).await,
+            _ => Err("Provider not supported for direct API check".into()),
+        };
+
+        let time_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+
+                let (available, error_type, error_message) = if (200..300).contains(&status) {
+                    (true, None, None)
+                } else {
+                    let err_type = match status {
+                        401 => {
+                            warnings.push(format!("模型 {model} 返回 401: Token 可能已过期或无效"));
+                            Some("AUTH_ERROR".to_string())
+                        }
+                        403 => {
+                            warnings.push(format!(
+                                "模型 {model} 返回 403: 无权访问，可能需要刷新 Token"
+                            ));
+                            Some("FORBIDDEN".to_string())
+                        }
+                        400 => {
+                            warnings.push(format!("模型 {model} 返回 400: 请求格式可能已变更"));
+                            Some("BAD_REQUEST".to_string())
+                        }
+                        404 => {
+                            warnings.push(format!("模型 {model} 返回 404: 模型或接口可能已下线"));
+                            Some("NOT_FOUND".to_string())
+                        }
+                        429 => {
+                            warnings.push(format!("模型 {model} 返回 429: 请求过于频繁"));
+                            Some("RATE_LIMITED".to_string())
+                        }
+                        500..=599 => {
+                            warnings.push(format!("模型 {model} 返回 {status}: 服务端错误"));
+                            Some("SERVER_ERROR".to_string())
+                        }
+                        _ => Some("UNKNOWN_ERROR".to_string()),
+                    };
+                    (
+                        false,
+                        err_type,
+                        Some(body[..body.len().min(200)].to_string()),
+                    )
+                };
+
+                results.push(ApiCheckResult {
+                    model: model.to_string(),
+                    available,
+                    status,
+                    error_type,
+                    error_message,
+                    time_ms,
+                });
+            }
+            Err(e) => {
+                warnings.push(format!("模型 {model} 请求失败: {e}"));
+                results.push(ApiCheckResult {
+                    model: model.to_string(),
+                    available: false,
+                    status: 0,
+                    error_type: Some("REQUEST_FAILED".to_string()),
+                    error_message: Some(e.to_string()),
+                    time_ms,
+                });
+            }
+        }
+    }
+
+    let overall_status = if results.iter().all(|r| r.available) {
+        "healthy".to_string()
+    } else if results.iter().any(|r| r.available) {
+        "partial".to_string()
+    } else {
+        "error".to_string()
+    };
+
+    let checked_at = chrono::Utc::now().to_rfc3339();
+
+    logs.write().await.add(
+        "info",
+        &format!("[API检测] {provider} 检测完成: {overall_status}"),
+    );
+
+    Ok(ApiCompatibilityResult {
+        provider,
+        overall_status,
+        checked_at,
+        results,
+        warnings,
+    })
+}
+
 #[tauri::command]
 async fn get_available_models() -> Result<Vec<ModelInfo>, String> {
     Ok(vec![
@@ -957,6 +1119,8 @@ pub fn run() {
             clear_logs,
             test_api,
             get_available_models,
+            // API Compatibility
+            check_api_compatibility,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
