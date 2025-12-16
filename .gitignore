@@ -18,3 +18,9 @@ Thumbs.db
 
 # Kiro
 .kiro/
+
+# Build artifacts
+ProxyCast_0.8.0/
+
+# NPM cache
+.npm-cache/
