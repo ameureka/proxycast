@@ -550,11 +550,12 @@ impl ProviderPoolService {
     }
 
     // Gemini OAuth 健康检查
+    // 使用 Code Assist API (cloudcode-pa.googleapis.com)，与 Gemini CLI 相同
     async fn check_gemini_health(
         &self,
         creds_path: &str,
         _project_id: Option<&str>,
-        model: &str,
+        _model: &str,
     ) -> Result<(), String> {
         let creds_content =
             std::fs::read_to_string(creds_path).map_err(|e| format!("读取凭证文件失败: {}", e))?;
@@ -565,34 +566,43 @@ impl ProviderPoolService {
             .as_str()
             .ok_or_else(|| "凭证中缺少 access_token".to_string())?;
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-            model
-        );
+        // 使用 Code Assist API - 与 Gemini CLI 相同的端点
+        // 使用 loadCodeAssist 作为健康检查，这是一个轻量级的 API 调用
+        let url = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 
         let request_body = serde_json::json!({
-            "contents": [{
-                "parts": [{"text": "Say OK"}]
-            }],
-            "generationConfig": {
-                "maxOutputTokens": 10
+            "cloudaicompanionProject": "",
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+                "duetProject": ""
             }
         });
 
+        tracing::debug!("[GEMINI HEALTH] 开始健康检查，使用 Code Assist API");
+
         let response = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(access_token)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "gemini-cli/0.1.32")
             .json(&request_body)
             .timeout(self.health_check_timeout)
             .send()
             .await
             .map_err(|e| format!("请求失败: {}", e))?;
 
-        if response.status().is_success() {
+        let status = response.status();
+        tracing::debug!("[GEMINI HEALTH] 响应状态: {}", status);
+
+        if status.is_success() {
             Ok(())
         } else {
-            Err(format!("HTTP {}", response.status()))
+            let body_text = response.text().await.unwrap_or_default();
+            tracing::warn!("[GEMINI HEALTH] 健康检查失败: {} - {}", status, body_text);
+            Err(format!("HTTP {}", status))
         }
     }
 

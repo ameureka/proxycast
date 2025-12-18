@@ -73,3 +73,157 @@
 Tauri 的编译方法论代表了桌面应用开发的未来方向：**用最擅长 UI 的技术（Web）做界面，用最擅长性能与安全的语言（Rust）做底层**。
 
 通过简单的 `npm run tauri build` 命令，开发者在本地即可完成从源码到高性能原生应用的全过程交付。
+
+
+前端 (React + TypeScript)
+- 基于 Tauri 2.0 的桌面应用
+- React 18 + Vite + Tailwind CSS + Radix UI
+- 模块化页面设计：Dashboard、Provider Pool、Settings 等
+
+后端 (Rust)
+- Axum HTTP 服务器提供 API 代理
+- 支持多种 Provider：Kiro、Gemini、Qwen、OpenAI、Claude
+- 完整的 OAuth Token 管理和自动刷新机制
+
+### 🔄 核心工作流程
+
+外部客户端 → ProxyCast API → 路由选择 → Provider 适配 → 上游 AI 服务
+    ↓
+标准 OpenAI/Anthropic 响应 ← 协议转换 ← 原始响应
+
+
+### 📁 关键模块解析
+
+1. Provider 系统 (src-tauri/src/providers/)
+- 每个 AI 服务商都有独立的适配器
+- 处理不同的认证方式（OAuth、API Key）
+- 统一的请求/响应转换接口
+
+2. Provider Pool (src-tauri/src/services/provider_pool_service.rs)
+- 管理多个凭证账号
+- 支持智能路由和故障转移
+- 动态切换不同的 Provider
+
+3. 协议转换 (src-tauri/src/converter/)
+- OpenAI ↔ Anthropic ↔ Gemini 格式互转
+- 流式响应处理
+- Tool Use (Function Calling) 支持
+
+4. 注入系统 (src-tauri/src/injection/)
+- 动态修改请求参数
+- 添加系统提示词
+- 请求预处理和后处理
+
+### 🚀 核心特性
+
+1. 多 Provider 统一管理 - 一个界面管理所有 AI 账号
+2. 智能路由 - 根据模型名称自动选择最佳 Provider
+3. 故障转移 - Provider 失败时自动切换备用账号
+4. Token 自动刷新 - OAuth Token 过期自动续期
+5. MCP 集成 - 支持 Model Context Protocol 扩展
+6. 实时监控 - 请求日志、状态监控、性能统计
+
+### 💡 学习价值
+
+对于 Rust 开发者：
+- Tauri 桌面应用开发最佳实践
+- Axum Web 服务器架构设计
+- 异步编程和错误处理模式
+- OAuth 流程和 Token 管理
+
+对于前端开发者：
+- React + TypeScript 现代开发模式
+- Tauri IPC 通信机制
+- 复杂状态管理和组件设计
+- 桌面应用 UI/UX 设计
+
+对于架构师：
+- API 网关设计模式
+- 多服务商适配器模式
+- 协议转换和兼容性处理
+- 微服务代理架构
+
+### 🔧 部署和使用
+
+bash
+# 开发环境
+npm install
+npm run tauri dev
+
+# 生产构建
+npm run tauri build
+
+
+配置示例：
+bash
+# 配置 API 客户端
+API Base URL: http://localhost:3001/v1
+API Key: proxycast-key
+
+
+这个项目展示了如何构建一个功能完整的 AI API 代理服务，特别适合学习现代桌面应用开发、API 网关设计和多服务集成的最佳实践。
+
+---
+
+## 5. 开发环境启动
+
+### 启动成功检查清单
+
+| 项目 | 预期状态 |
+|------|---------|
+| Vite 前端 | ✅ 运行在 `http://localhost:1420/` |
+| Rust 后端 | ✅ 编译完成并运行中 |
+| 桌面窗口 | ✅ 自动弹出 |
+
+### 关于应用形式
+
+ProxyCast 是**桌面应用**，不是纯浏览器应用：
+
+- 虽然界面使用 Web 技术 (React)，但它被包装在 Tauri 桌面框架中
+- 你会看到一个**独立的应用窗口**，而不是在浏览器标签页中运行
+- Rust 后端负责处理系统级功能（如文件读取、网络代理等）
+
+### 首次使用步骤
+
+1. 点击「**凭证池**」加载 OAuth 凭证
+2. 点击「**启动服务器**」开始 API 代理服务
+3. 配置其他 AI 工具使用代理
+
+---
+
+## 6. 调试方法对比
+
+### 方法一：浏览器调试 (推荐用于前端开发)
+
+直接在浏览器打开 `http://localhost:1420/`
+
+**优点：**
+- 可以使用 Chrome/Firefox 的完整 DevTools
+- 热更新更快
+- 方便查看网络请求、Console 日志
+- 支持 React DevTools 插件
+
+**缺点：**
+- 无法调用 Tauri API（如文件系统、系统对话框等）
+- 只能看到 UI，后端功能不可用
+
+### 方法二：桌面应用调试 (完整功能)
+
+在 Tauri 桌面窗口中使用开发者工具。
+
+**打开 DevTools 的方式：**
+- 快捷键: `Cmd + Option + I` (macOS) 或 `Ctrl + Shift + I` (Windows)
+- 或在应用窗口中**右键 → Inspect Element**
+
+**优点：**
+- 可以调试完整功能（包括 Rust 后端调用）
+- 测试真实的系统交互
+
+### 调试场景推荐
+
+| 调试场景 | 推荐方式 |
+|---------|---------|
+| 纯 UI/样式调整 | 浏览器 `localhost:1420` |
+| React 组件逻辑 | 浏览器 + React DevTools |
+| Tauri 命令/Rust 交互 | 桌面应用 DevTools |
+| 文件读写/系统功能 | 桌面应用 DevTools |
