@@ -57,6 +57,11 @@ impl ProtocolSelector {
             PoolProviderType::OpenAI => Protocol::OpenAI,
             PoolProviderType::Claude => Protocol::Anthropic,
             PoolProviderType::Antigravity => Protocol::Antigravity,
+            PoolProviderType::Vertex => Protocol::Gemini, // Vertex AI uses Gemini protocol
+            PoolProviderType::GeminiApiKey => Protocol::Gemini, // Gemini API Key uses Gemini protocol
+            PoolProviderType::Codex => Protocol::OpenAI,        // Codex uses OpenAI protocol
+            PoolProviderType::ClaudeOAuth => Protocol::Anthropic, // Claude OAuth uses Anthropic protocol
+            PoolProviderType::IFlow => Protocol::OpenAI,          // iFlow uses OpenAI protocol
         }
     }
 

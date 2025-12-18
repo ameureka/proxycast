@@ -1,8 +1,13 @@
-import React, { useState, useMemo, useCallback } from "react";
-import { X, ExternalLink, Wand2, Eye, EyeOff } from "lucide-react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
+import { X, ExternalLink, Wand2, Eye, EyeOff, Database } from "lucide-react";
 import { Provider, AppType } from "@/lib/api/switch";
 import { getConfig } from "@/hooks/useTauri";
 import { cn } from "@/lib/utils";
+import {
+  providerPoolApi,
+  CredentialDisplay,
+  PoolProviderType,
+} from "@/lib/api/providerPool";
 
 interface ProviderFormProps {
   appType: AppType;
@@ -20,6 +25,7 @@ type ProviderCategory =
   | "aggregator"
   | "third_party"
   | "proxy"
+  | "credential_pool"
   | "custom";
 
 // 预设供应商接口
@@ -137,6 +143,13 @@ const presets: Record<AppType, ProviderPreset[]> = {
       iconColor: "#3b82f6",
       defaultBaseUrl: "http://127.0.0.1:3001",
     },
+    // 从凭证池导入
+    {
+      id: "credential_pool",
+      name: "从凭证池导入",
+      category: "credential_pool",
+      iconColor: "#22c55e",
+    },
     // 自定义
     {
       id: "custom",
@@ -181,6 +194,13 @@ model = "gpt-4o"
         api_base_url: "http://127.0.0.1:3001/v1",
       },
     },
+    // 从凭证池导入
+    {
+      id: "credential_pool",
+      name: "从凭证池导入",
+      category: "credential_pool",
+      iconColor: "#22c55e",
+    },
     // 自定义
     {
       id: "custom",
@@ -211,6 +231,13 @@ model = "gpt-4o"
         GEMINI_MODEL: "gemini-2.0-flash",
       },
     },
+    // 从凭证池导入
+    {
+      id: "credential_pool",
+      name: "从凭证池导入",
+      category: "credential_pool",
+      iconColor: "#22c55e",
+    },
     // 自定义
     {
       id: "custom",
@@ -228,6 +255,7 @@ const categoryLabels: Record<ProviderCategory, string> = {
   aggregator: "聚合服务",
   third_party: "第三方",
   proxy: "本地代理",
+  credential_pool: "从凭证池导入",
   custom: "自定义",
 };
 
@@ -450,6 +478,53 @@ export function ProviderForm({
   const [error, setError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
 
+  // 凭证池相关状态
+  const [poolCredentials, setPoolCredentials] = useState<CredentialDisplay[]>(
+    [],
+  );
+  const [selectedCredentialUuid, setSelectedCredentialUuid] = useState<
+    string | null
+  >(null);
+  const [loadingCredentials, setLoadingCredentials] = useState(false);
+
+  // 加载凭证池数据
+  const loadPoolCredentials = useCallback(async () => {
+    setLoadingCredentials(true);
+    try {
+      const overview = await providerPoolApi.getOverview();
+      // 根据 appType 筛选相关的凭证类型
+      const relevantTypes: PoolProviderType[] =
+        appType === "claude"
+          ? ["claude", "kiro", "antigravity"]
+          : appType === "codex"
+            ? ["openai", "codex"]
+            : appType === "gemini"
+              ? ["gemini"]
+              : [];
+
+      const credentials: CredentialDisplay[] = [];
+      for (const pool of overview) {
+        if (relevantTypes.includes(pool.provider_type as PoolProviderType)) {
+          credentials.push(
+            ...pool.credentials.filter((c) => c.is_healthy && !c.is_disabled),
+          );
+        }
+      }
+      setPoolCredentials(credentials);
+    } catch (e) {
+      console.error("Failed to load pool credentials:", e);
+    } finally {
+      setLoadingCredentials(false);
+    }
+  }, [appType]);
+
+  // 当选择"从凭证池导入"时加载凭证
+  useEffect(() => {
+    if (selectedPresetId === "credential_pool") {
+      loadPoolCredentials();
+    }
+  }, [selectedPresetId, loadPoolCredentials]);
+
   // 当前选中的预设
   const selectedPreset = useMemo(() => {
     return appPresets.find((p) => p.id === selectedPresetId);
@@ -548,6 +623,55 @@ export function ProviderForm({
           setGeminiEnv(defaultGeminiEnv);
         }
       }
+
+      // 凭证池预设：重置选中的凭证
+      if (preset.id === "credential_pool") {
+        setSelectedCredentialUuid(null);
+      }
+    }
+  };
+
+  // 处理凭证选择
+  const handleCredentialSelect = async (credential: CredentialDisplay) => {
+    setSelectedCredentialUuid(credential.uuid);
+    setName(credential.name || `${credential.provider_type} 凭证`);
+    setIconColor("#22c55e");
+
+    // 根据凭证类型和 appType 设置配置
+    // 使用 ProxyCast 代理，凭证池中的凭证通过本地代理访问
+    try {
+      const config = await getConfig();
+      const proxyApiKey = config.server.api_key || "";
+      const proxyHost = config.server.host || "127.0.0.1";
+      const proxyPort = config.server.port || 3001;
+      const proxyBaseUrl = `http://${proxyHost}:${proxyPort}`;
+
+      if (appType === "claude") {
+        setApiKey(proxyApiKey);
+        setBaseUrl(proxyBaseUrl);
+        setJsonManuallyEdited(false);
+      } else if (appType === "codex") {
+        setCodexAuth(
+          JSON.stringify(
+            {
+              api_key: proxyApiKey,
+              api_base_url: `${proxyBaseUrl}/v1`,
+            },
+            null,
+            2,
+          ),
+        );
+      } else if (appType === "gemini") {
+        setGeminiEnv(
+          `GEMINI_API_KEY=${proxyApiKey}\nGOOGLE_GEMINI_BASE_URL=${proxyBaseUrl}\nGEMINI_MODEL=gemini-2.0-flash`,
+        );
+      }
+
+      setNotes(
+        `使用凭证池: ${credential.provider_type} - ${credential.uuid.slice(0, 8)}`,
+      );
+    } catch (e) {
+      console.error("Failed to load config:", e);
     }
   };
 
@@ -677,6 +801,84 @@ export function ProviderForm({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* 凭证池选择器（当选择"从凭证池导入"时显示） */}
+          {!isEditMode && selectedPresetId === "credential_pool" && (
+            <div className="space-y-3">
+              <label className="block text-sm font-medium flex items-center gap-2">
+                <Database className="h-4 w-4" />
+                选择凭证
+              </label>
+              {loadingCredentials ? (
+                <div className="flex items-center justify-center py-8 text-muted-foreground">
+                  <div className="animate-spin rounded-full h-5 w-5 border-2 border-primary border-t-transparent mr-2" />
+                  加载凭证中...
+                </div>
+              ) : poolCredentials.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground border border-dashed rounded-lg">
+                  <Database className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>暂无可用凭证</p>
+                  <p className="text-xs mt-1">请先在凭证池中添加凭证</p>
+                </div>
+              ) : (
+                <div className="grid gap-2 max-h-48 overflow-y-auto">
+                  {poolCredentials.map((credential) => {
+                    // 判断凭证类型：OAuth 类型需要通过代理，API Key 类型可直接使用
+                    const isOAuthType =
+                      credential.credential_type.includes("oauth");
+                    const typeLabel = isOAuthType ? "代理" : "API Key";
+                    const typeColor = isOAuthType ? "#3b82f6" : "#22c55e";
+
+                    return (
+                      <button
+                        key={credential.uuid}
+                        type="button"
+                        onClick={() => handleCredentialSelect(credential)}
+                        className={cn(
+                          "flex items-center gap-3 p-3 rounded-lg border text-left transition-all",
+                          selectedCredentialUuid === credential.uuid
+                            ? "border-primary bg-primary/10"
+                            : "border-border hover:border-muted-foreground/50 hover:bg-muted/50",
+                        )}
+                      >
+                        <div
+                          className="w-3 h-3 rounded-full flex-shrink-0"
+                          style={{
+                            backgroundColor: credential.is_healthy
+                              ? "#22c55e"
+                              : "#ef4444",
+                          }}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="font-medium truncate">
+                              {credential.name || credential.uuid.slice(0, 8)}
+                            </p>
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+                              style={{
+                                backgroundColor: `${typeColor}20`,
+                                color: typeColor,
+                              }}
+                            >
+                              {typeLabel}
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {credential.provider_type} ·{" "}
+                            {credential.uuid.slice(0, 8)}...
+                          </p>
+                        </div>
+                        {selectedCredentialUuid === credential.uuid && (
+                          <span className="text-xs text-primary">已选择</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

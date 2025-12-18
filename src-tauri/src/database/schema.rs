@@ -151,5 +151,11 @@ pub fn create_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
 
+    // Migration: 添加凭证来源字段
+    let _ = conn.execute(
+        "ALTER TABLE provider_pool_credentials ADD COLUMN source TEXT DEFAULT 'manual'",
+        [],
+    );
+
     Ok(())
 }

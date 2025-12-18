@@ -1,10 +1,11 @@
 //! Provider Pool Tauri 命令
 
+use crate::credential::CredentialSyncService;
 use crate::database::dao::provider_pool::ProviderPoolDao;
 use crate::database::DbConnection;
 use crate::models::provider_pool_model::{
     AddCredentialRequest, CredentialData, CredentialDisplay, HealthCheckResult, OAuthStatus,
-    ProviderCredential, ProviderPoolOverview, UpdateCredentialRequest,
+    PoolProviderType, ProviderCredential, ProviderPoolOverview, UpdateCredentialRequest,
 };
 use crate::services::provider_pool_service::ProviderPoolService;
 use chrono::Utc;
@@ -15,6 +16,9 @@ use tauri::State;
 use uuid::Uuid;
 
 pub struct ProviderPoolServiceState(pub Arc<ProviderPoolService>);
+
+/// 凭证同步服务状态封装
+pub struct CredentialSyncServiceState(pub Option<Arc<CredentialSyncService>>);
 
 /// 展开路径中的 ~ 为用户主目录
 fn expand_tilde(path: &str) -> String {
@@ -42,6 +46,9 @@ fn get_credentials_dir() -> Result<PathBuf, String> {
 }
 
 /// 复制并重命名 OAuth 凭证文件
+///
+/// 对于 Kiro 凭证，会自动合并 clientIdHash 文件中的 client_id/client_secret，
+/// 使副本文件完全独立，支持多账号场景。
 fn copy_and_rename_credential_file(
     source_path: &str,
     provider_type: &str,
@@ -73,8 +80,103 @@ fn copy_and_rename_credential_file(
     let credentials_dir = get_credentials_dir()?;
     let target_path = credentials_dir.join(&new_filename);
 
-    // 复制文件
-    fs::copy(&source, &target_path).map_err(|e| format!("复制凭证文件失败: {}", e))?;
+    // 对于 Kiro 凭证，需要合并 clientIdHash 文件中的 client_id/client_secret
+    if provider_type == "kiro" {
+        let content =
+            fs::read_to_string(&source).map_err(|e| format!("读取凭证文件失败: {}", e))?;
+        let mut creds: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| format!("解析凭证文件失败: {}", e))?;
+
+        let aws_sso_cache_dir = dirs::home_dir()
+            .ok_or_else(|| "无法获取用户主目录".to_string())?
+            .join(".aws")
+            .join("sso")
+            .join("cache");
+
+        // 尝试从 clientIdHash 文件或扫描目录获取 client_id/client_secret
+        let mut found_credentials = false;
+
+        // 方式1：如果有 clientIdHash，读取对应文件
+        if let Some(hash) = creds.get("clientIdHash").and_then(|v| v.as_str()) {
+            let hash_file_path = aws_sso_cache_dir.join(format!("{}.json", hash));
+
+            if hash_file_path.exists() {
+                if let Ok(hash_content) = fs::read_to_string(&hash_file_path) {
+                    if let Ok(hash_json) = serde_json::from_str::<serde_json::Value>(&hash_content)
+                    {
+                        if let Some(client_id) = hash_json.get("clientId") {
+                            creds["clientId"] = client_id.clone();
+                        }
+                        if let Some(client_secret) = hash_json.get("clientSecret") {
+                            creds["clientSecret"] = client_secret.clone();
+                        }
+                        if creds.get("clientId").is_some() && creds.get("clientSecret").is_some() {
+                            found_credentials = true;
+                            tracing::info!(
+                                "[KIRO] 已从 clientIdHash 文件合并 client_id/client_secret 到副本"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 方式2：如果没有 clientIdHash 或未找到，扫描目录中的其他 JSON 文件
+        if !found_credentials && aws_sso_cache_dir.exists() {
+            tracing::info!(
+                "[KIRO] 没有 clientIdHash 或未找到，扫描目录查找 client_id/client_secret"
+            );
+            if let Ok(entries) = fs::read_dir(&aws_sso_cache_dir) {
+                for entry in entries.flatten() {
+                    let file_path = entry.path();
+                    // 跳过主凭证文件和备份文件
+                    if file_path.extension().map(|e| e == "json").unwrap_or(false) {
+                        let file_name =
+                            file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if file_name.starts_with("kiro-auth-token") {
+                            continue;
+                        }
+                        if let Ok(file_content) = fs::read_to_string(&file_path) {
+                            if let Ok(file_json) =
+                                serde_json::from_str::<serde_json::Value>(&file_content)
+                            {
+                                let has_client_id =
+                                    file_json.get("clientId").and_then(|v| v.as_str()).is_some();
+                                let has_client_secret = file_json
+                                    .get("clientSecret")
+                                    .and_then(|v| v.as_str())
+                                    .is_some();
+                                if has_client_id && has_client_secret {
+                                    creds["clientId"] = file_json["clientId"].clone();
+                                    creds["clientSecret"] = file_json["clientSecret"].clone();
+                                    found_credentials = true;
+                                    tracing::info!(
+                                        "[KIRO] 已从 {} 合并 client_id/client_secret 到副本",
+                                        file_name
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !found_credentials {
+            tracing::warn!(
+                "[KIRO] 未找到 client_id/client_secret，副本可能无法独立刷新 Token（将使用 social 认证）"
+            );
+        }
+
+        // 写入合并后的凭证到副本文件
+        let merged_content =
+            serde_json::to_string_pretty(&creds).map_err(|e| format!("序列化凭证失败: {}", e))?;
+        fs::write(&target_path, merged_content).map_err(|e| format!("写入凭证文件失败: {}", e))?;
+    } else {
+        // 其他类型直接复制
+        fs::copy(&source, &target_path).map_err(|e| format!("复制凭证文件失败: {}", e))?;
+    }
 
     // 返回新的文件路径
     Ok(target_path.to_string_lossy().to_string())
@@ -121,32 +223,59 @@ pub fn get_provider_pool_credentials(
 }
 
 /// 添加凭证
+///
+/// 添加凭证到数据库，并同步到 YAML 配置文件
+/// Requirements: 1.1, 1.2
 #[tauri::command]
 pub fn add_provider_pool_credential(
     db: State<'_, DbConnection>,
     pool_service: State<'_, ProviderPoolServiceState>,
+    sync_service: State<'_, CredentialSyncServiceState>,
     request: AddCredentialRequest,
 ) -> Result<ProviderCredential, String> {
-    pool_service.0.add_credential(
+    // 添加到数据库
+    let credential = pool_service.0.add_credential(
         &db,
         &request.provider_type,
         request.credential,
         request.name,
         request.check_health,
         request.check_model_name,
-    )
+    )?;
+
+    // 同步到 YAML 配置（如果同步服务可用）
+    if let Some(ref sync) = sync_service.0 {
+        if let Err(e) = sync.add_credential(&credential) {
+            // 记录警告但不中断操作
+            tracing::warn!("同步凭证到 YAML 失败: {}", e);
+        }
+    }
+
+    Ok(credential)
 }
 
 /// 更新凭证
+/// 更新凭证
+///
+/// 更新数据库中的凭证，并同步到 YAML 配置文件
+/// Requirements: 1.1, 1.2
 #[tauri::command]
 pub fn update_provider_pool_credential(
     db: State<'_, DbConnection>,
     pool_service: State<'_, ProviderPoolServiceState>,
+    sync_service: State<'_, CredentialSyncServiceState>,
     uuid: String,
     request: UpdateCredentialRequest,
 ) -> Result<ProviderCredential, String> {
+    tracing::info!(
+        "[UPDATE_CREDENTIAL] 收到更新请求: uuid={}, name={:?}, check_model_name={:?}, not_supported_models={:?}",
+        uuid,
+        request.name,
+        request.check_model_name,
+        request.not_supported_models
+    );
     // 如果需要重新上传文件，先处理文件上传
-    if let Some(new_file_path) = request.new_creds_file_path {
+    let credential = if let Some(new_file_path) = request.new_creds_file_path {
         // 获取当前凭证以确定类型
         let conn = db.lock().map_err(|e| e.to_string())?;
         let current_credential = ProviderPoolDao::get_by_uuid(&conn, &uuid)
@@ -217,8 +346,9 @@ pub fn update_provider_pool_credential(
         }
 
         // 应用其他更新
+        // 处理 name：空字符串表示清除，None 表示不修改
         if let Some(name) = request.name {
-            updated_cred.name = Some(name);
+            updated_cred.name = if name.is_empty() { None } else { Some(name) };
         }
         if let Some(is_disabled) = request.is_disabled {
             updated_cred.is_disabled = is_disabled;
@@ -226,8 +356,13 @@ pub fn update_provider_pool_credential(
         if let Some(check_health) = request.check_health {
             updated_cred.check_health = check_health;
         }
+        // 处理 check_model_name：空字符串表示清除，None 表示不修改
         if let Some(check_model_name) = request.check_model_name {
-            updated_cred.check_model_name = Some(check_model_name);
+            updated_cred.check_model_name = if check_model_name.is_empty() {
+                None
+            } else {
+                Some(check_model_name)
+            };
         }
         if let Some(not_supported_models) = request.not_supported_models {
             updated_cred.not_supported_models = not_supported_models;
@@ -238,7 +373,78 @@ pub fn update_provider_pool_credential(
         // 保存到数据库
         ProviderPoolDao::update(&conn, &updated_cred).map_err(|e| e.to_string())?;
 
-        Ok(updated_cred)
+        updated_cred
+    } else if request.new_base_url.is_some() || request.new_api_key.is_some() {
+        // 更新 API Key 凭证的 api_key 和/或 base_url
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let mut current_credential = ProviderPoolDao::get_by_uuid(&conn, &uuid)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("凭证不存在: {}", uuid))?;
+
+        // 更新 api_key 和 base_url
+        match &mut current_credential.credential {
+            CredentialData::OpenAIKey { api_key, base_url } => {
+                if let Some(new_key) = request.new_api_key {
+                    if !new_key.is_empty() {
+                        *api_key = new_key;
+                    }
+                }
+                if let Some(new_url) = request.new_base_url {
+                    *base_url = if new_url.is_empty() {
+                        None
+                    } else {
+                        Some(new_url)
+                    };
+                }
+            }
+            CredentialData::ClaudeKey { api_key, base_url } => {
+                if let Some(new_key) = request.new_api_key {
+                    if !new_key.is_empty() {
+                        *api_key = new_key;
+                    }
+                }
+                if let Some(new_url) = request.new_base_url {
+                    *base_url = if new_url.is_empty() {
+                        None
+                    } else {
+                        Some(new_url)
+                    };
+                }
+            }
+            _ => {
+                return Err("只有 API Key 凭证支持修改 API Key 和 Base URL".to_string());
+            }
+        }
+
+        // 应用其他更新
+        // 处理 name：空字符串表示清除，None 表示不修改
+        if let Some(name) = request.name {
+            current_credential.name = if name.is_empty() { None } else { Some(name) };
+        }
+        if let Some(is_disabled) = request.is_disabled {
+            current_credential.is_disabled = is_disabled;
+        }
+        if let Some(check_health) = request.check_health {
+            current_credential.check_health = check_health;
+        }
+        // 处理 check_model_name：空字符串表示清除，None 表示不修改
+        if let Some(check_model_name) = request.check_model_name {
+            current_credential.check_model_name = if check_model_name.is_empty() {
+                None
+            } else {
+                Some(check_model_name)
+            };
+        }
+        if let Some(not_supported_models) = request.not_supported_models {
+            current_credential.not_supported_models = not_supported_models;
+        }
+
+        current_credential.updated_at = Utc::now();
+
+        // 保存到数据库
+        ProviderPoolDao::update(&conn, &current_credential).map_err(|e| e.to_string())?;
+
+        current_credential
     } else {
         // 常规更新，不涉及文件
         pool_service.0.update_credential(
@@ -249,18 +455,49 @@ pub fn update_provider_pool_credential(
             request.check_health,
             request.check_model_name,
             request.not_supported_models,
-        )
+        )?
+    };
+
+    // 同步到 YAML 配置（如果同步服务可用）
+    if let Some(ref sync) = sync_service.0 {
+        if let Err(e) = sync.update_credential(&credential) {
+            // 记录警告但不中断操作
+            tracing::warn!("同步凭证更新到 YAML 失败: {}", e);
+        }
     }
+
+    Ok(credential)
 }
 
 /// 删除凭证
+/// 删除凭证
+///
+/// 从数据库删除凭证，并同步到 YAML 配置文件
+/// Requirements: 1.1, 1.2
 #[tauri::command]
 pub fn delete_provider_pool_credential(
     db: State<'_, DbConnection>,
     pool_service: State<'_, ProviderPoolServiceState>,
+    sync_service: State<'_, CredentialSyncServiceState>,
     uuid: String,
+    provider_type: Option<String>,
 ) -> Result<bool, String> {
-    pool_service.0.delete_credential(&db, &uuid)
+    // 从数据库删除
+    let result = pool_service.0.delete_credential(&db, &uuid)?;
+
+    // 同步到 YAML 配置（如果同步服务可用且提供了 provider_type）
+    if let Some(ref sync) = sync_service.0 {
+        if let Some(pt) = provider_type {
+            if let Ok(pool_type) = pt.parse::<PoolProviderType>() {
+                if let Err(e) = sync.remove_credential(pool_type, &uuid) {
+                    // 记录警告但不中断操作
+                    tracing::warn!("从 YAML 删除凭证失败: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// 切换凭证启用/禁用状态
@@ -734,4 +971,33 @@ pub async fn test_user_credentials() -> Result<String, String> {
     }
 
     Ok(result)
+}
+
+/// 迁移 Private 配置到凭证池
+///
+/// 从 providers 配置中读取单个凭证配置，迁移到凭证池中并标记为 Private 来源
+/// Requirements: 6.4
+#[tauri::command]
+pub fn migrate_private_config_to_pool(
+    db: State<'_, DbConnection>,
+    pool_service: State<'_, ProviderPoolServiceState>,
+    config: crate::config::Config,
+) -> Result<MigrationResultResponse, String> {
+    let result = pool_service.0.migrate_private_config(&db, &config)?;
+    Ok(MigrationResultResponse {
+        migrated_count: result.migrated_count,
+        skipped_count: result.skipped_count,
+        errors: result.errors,
+    })
+}
+
+/// 迁移结果响应
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MigrationResultResponse {
+    /// 成功迁移的凭证数量
+    pub migrated_count: usize,
+    /// 跳过的凭证数量（已存在）
+    pub skipped_count: usize,
+    /// 错误信息列表
+    pub errors: Vec<String>,
 }

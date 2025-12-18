@@ -2,7 +2,7 @@
 //!
 //! 使用 proptest 进行属性测试
 
-use crate::router::{ModelMapper, Router, RoutingRule};
+use crate::router::{AmpRouter, ModelMapper, Router, RoutingRule};
 use crate::ProviderType;
 use proptest::prelude::*;
 
@@ -443,6 +443,318 @@ proptest! {
             result.provider,
             provider,
             "is_excluded 返回 true，但路由仍指向被排除的 Provider"
+        );
+    }
+}
+
+// ============================================================================
+// Amp Router Property Tests
+// ============================================================================
+
+/// 生成有效的 provider 名称
+fn arb_provider_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("anthropic".to_string()),
+        Just("openai".to_string()),
+        Just("google".to_string()),
+        Just("gemini".to_string()),
+        Just("vertex".to_string()),
+        // 随机 provider 名称
+        "[a-z][a-z0-9]{2,15}".prop_map(|s| s),
+    ]
+}
+
+/// 生成有效的 API 版本
+fn arb_api_version() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("v1".to_string()),
+        Just("v2".to_string()),
+        // 随机版本号
+        "v[1-9][0-9]?".prop_map(|s| s),
+    ]
+}
+
+/// 生成有效的端点路径
+fn arb_endpoint() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("messages".to_string()),
+        Just("chat/completions".to_string()),
+        Just("completions".to_string()),
+        Just("embeddings".to_string()),
+        // 随机端点
+        "[a-z][a-z0-9_/]{1,30}".prop_map(|s| s),
+    ]
+}
+
+/// 生成有效的 Amp provider 路由路径
+fn arb_valid_amp_provider_path() -> impl Strategy<Value = (String, String, String, String)> {
+    (arb_provider_name(), arb_api_version(), arb_endpoint()).prop_map(
+        |(provider, version, endpoint)| {
+            let path = format!("/api/provider/{}/{}/{}", provider, version, endpoint);
+            (path, provider, version, endpoint)
+        },
+    )
+}
+
+/// 生成无效的 Amp 路由路径（不匹配 /api/provider/{provider}/v*/* 模式）
+fn arb_invalid_amp_path() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // 路径太短
+        Just("/api/provider".to_string()),
+        Just("/api/provider/anthropic".to_string()),
+        Just("/api/provider/anthropic/v1".to_string()),
+        // 不是 api/provider 开头
+        "[a-z]+/[a-z]+/[a-z]+/v1/messages".prop_map(|s| format!("/{}", s)),
+        // 版本格式不对（不以 v 开头）
+        (arb_provider_name(), arb_endpoint())
+            .prop_map(|(provider, endpoint)| format!("/api/provider/{}/1/{}", provider, endpoint)),
+        // 完全不相关的路径
+        Just("/v1/messages".to_string()),
+        Just("/health".to_string()),
+        Just("/api/other/path".to_string()),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* request path matching `/api/provider/{provider}/v1/*`, the router
+    /// SHALL correctly extract the provider and route accordingly.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_pattern_matching_valid_paths(
+        (path, expected_provider, expected_version, expected_endpoint) in arb_valid_amp_provider_path()
+    ) {
+        let router = AmpRouter::default();
+        let result = router.parse_provider_route(&path);
+
+        prop_assert!(
+            result.is_some(),
+            "有效的 Amp 路径 '{}' 应该被成功解析",
+            path
+        );
+
+        let route_match = result.unwrap();
+
+        // 验证 provider 被正确提取
+        prop_assert_eq!(
+            &route_match.provider,
+            &expected_provider,
+            "Provider 应该是 '{}'，但实际是 '{}'",
+            expected_provider,
+            route_match.provider
+        );
+
+        // 验证 version 被正确提取
+        prop_assert_eq!(
+            &route_match.version,
+            &expected_version,
+            "Version 应该是 '{}'，但实际是 '{}'",
+            expected_version,
+            route_match.version
+        );
+
+        // 验证 endpoint 被正确提取（endpoint 是 remaining_path 的第一部分）
+        let endpoint_first_part = expected_endpoint.split('/').next().unwrap_or("");
+        prop_assert_eq!(
+            &route_match.endpoint,
+            endpoint_first_part,
+            "Endpoint 应该是 '{}'，但实际是 '{}'",
+            endpoint_first_part,
+            route_match.endpoint
+        );
+
+        // 验证 remaining_path 包含完整的端点路径
+        prop_assert_eq!(
+            &route_match.remaining_path,
+            &expected_endpoint,
+            "Remaining path 应该是 '{}'，但实际是 '{}'",
+            expected_endpoint,
+            route_match.remaining_path
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* request path NOT matching `/api/provider/{provider}/v*/*`, the router
+    /// SHALL return None.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_pattern_matching_invalid_paths(path in arb_invalid_amp_path()) {
+        let router = AmpRouter::default();
+        let result = router.parse_provider_route(&path);
+
+        prop_assert!(
+            result.is_none(),
+            "无效的 Amp 路径 '{}' 不应该被解析",
+            path
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* valid Amp provider path, the router SHALL correctly identify
+    /// the protocol type (Anthropic vs OpenAI) based on provider name or remaining_path.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_protocol_detection(
+        provider in arb_provider_name(),
+        version in arb_api_version()
+    ) {
+        let router = AmpRouter::default();
+
+        // 测试 Anthropic 协议（messages 端点）
+        let anthropic_path = format!("/api/provider/{}/{}/messages", provider, version);
+        let anthropic_result = router.parse_provider_route(&anthropic_path);
+        prop_assert!(anthropic_result.is_some());
+        let anthropic_match = anthropic_result.unwrap();
+        prop_assert!(
+            anthropic_match.is_anthropic_protocol(),
+            "messages 端点应该被识别为 Anthropic 协议"
+        );
+
+        // 测试 OpenAI 协议 - 使用 openai provider 名称
+        // 注意：is_openai_protocol() 检查 provider == "openai" 或 endpoint.contains("chat/completions")
+        // 由于 endpoint 只是路径的第一部分（如 "chat"），所以需要通过 provider 名称来识别
+        let openai_path = format!("/api/provider/openai/{}/chat/completions", version);
+        let openai_result = router.parse_provider_route(&openai_path);
+        prop_assert!(openai_result.is_some());
+        let openai_match = openai_result.unwrap();
+        prop_assert!(
+            openai_match.is_openai_protocol(),
+            "openai provider 应该被识别为 OpenAI 协议"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* valid Amp provider path, the target_path() method SHALL return
+    /// the correct path without the /api/provider/{provider} prefix.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_target_path(
+        (path, _provider, version, endpoint) in arb_valid_amp_provider_path()
+    ) {
+        let router = AmpRouter::default();
+        let result = router.parse_provider_route(&path);
+
+        prop_assert!(result.is_some());
+        let route_match = result.unwrap();
+
+        let expected_target = format!("/{}/{}", version, endpoint);
+        let actual_target = route_match.target_path();
+        prop_assert_eq!(
+            &actual_target,
+            &expected_target,
+            "target_path() 应该返回 '{}'，但实际返回 '{}'",
+            expected_target,
+            actual_target
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* valid Amp provider path with or without leading slash,
+    /// the router SHALL correctly parse the path.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_leading_slash_invariant(
+        provider in arb_provider_name(),
+        version in arb_api_version(),
+        endpoint in arb_endpoint()
+    ) {
+        let router = AmpRouter::default();
+
+        // 带前导斜杠的路径
+        let path_with_slash = format!("/api/provider/{}/{}/{}", provider, version, endpoint);
+        let result_with_slash = router.parse_provider_route(&path_with_slash);
+
+        // 不带前导斜杠的路径
+        let path_without_slash = format!("api/provider/{}/{}/{}", provider, version, endpoint);
+        let result_without_slash = router.parse_provider_route(&path_without_slash);
+
+        // 两者都应该成功解析
+        prop_assert!(result_with_slash.is_some());
+        prop_assert!(result_without_slash.is_some());
+
+        // 解析结果应该相同
+        let match_with = result_with_slash.unwrap();
+        let match_without = result_without_slash.unwrap();
+
+        prop_assert_eq!(
+            match_with.provider,
+            match_without.provider,
+            "带/不带前导斜杠的路径应该解析出相同的 provider"
+        );
+        prop_assert_eq!(
+            match_with.version,
+            match_without.version,
+            "带/不带前导斜杠的路径应该解析出相同的 version"
+        );
+        prop_assert_eq!(
+            match_with.endpoint,
+            match_without.endpoint,
+            "带/不带前导斜杠的路径应该解析出相同的 endpoint"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* path, is_amp_route() SHALL return true if and only if the path
+    /// is either a valid provider route or a management route.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_route_is_amp_route_consistency(
+        (path, _, _, _) in arb_valid_amp_provider_path()
+    ) {
+        let router = AmpRouter::default();
+
+        // 有效的 provider 路由应该被 is_amp_route 识别
+        prop_assert!(
+            router.is_amp_route(&path),
+            "有效的 provider 路由 '{}' 应该被 is_amp_route() 识别",
+            path
+        );
+
+        // parse_provider_route 和 is_amp_route 应该一致
+        let parse_result = router.parse_provider_route(&path);
+        prop_assert!(
+            parse_result.is_some() == router.is_amp_route(&path) || router.is_management_route(&path),
+            "parse_provider_route 和 is_amp_route 应该一致"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 11: Amp Route Pattern Matching**
+    /// *For any* management route path, is_management_route() SHALL return true.
+    /// **Validates: Requirements 5.1**
+    #[test]
+    fn prop_amp_management_route_detection(
+        suffix in "[a-z][a-z0-9_/]{1,20}"
+    ) {
+        let router = AmpRouter::default();
+
+        // /api/auth/* 路径
+        let auth_path = format!("/api/auth/{}", suffix);
+        prop_assert!(
+            router.is_management_route(&auth_path),
+            "/api/auth/* 路径 '{}' 应该被识别为管理路由",
+            auth_path
+        );
+
+        // /api/user/* 路径
+        let user_path = format!("/api/user/{}", suffix);
+        prop_assert!(
+            router.is_management_route(&user_path),
+            "/api/user/* 路径 '{}' 应该被识别为管理路由",
+            user_path
+        );
+
+        // 管理路由也应该被 is_amp_route 识别
+        prop_assert!(
+            router.is_amp_route(&auth_path),
+            "管理路由 '{}' 应该被 is_amp_route() 识别",
+            auth_path
+        );
+        prop_assert!(
+            router.is_amp_route(&user_path),
+            "管理路由 '{}' 应该被 is_amp_route() 识别",
+            user_path
         );
     }
 }

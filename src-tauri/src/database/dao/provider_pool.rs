@@ -3,7 +3,8 @@
 //! 提供凭证池的 CRUD 操作。
 
 use crate::models::provider_pool_model::{
-    CachedTokenInfo, CredentialData, PoolProviderType, ProviderCredential, ProviderPools,
+    CachedTokenInfo, CredentialData, CredentialSource, PoolProviderType, ProviderCredential,
+    ProviderPools,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection};
@@ -17,7 +18,7 @@ impl ProviderPoolDao {
             "SELECT uuid, provider_type, credential_data, name, is_healthy, is_disabled,
                     check_health, check_model_name, not_supported_models, usage_count, error_count,
                     last_used, last_error_time, last_error_message, last_health_check_time,
-                    last_health_check_model, created_at, updated_at
+                    last_health_check_model, created_at, updated_at, source
              FROM provider_pool_credentials
              ORDER BY provider_type, created_at ASC",
         )?;
@@ -42,7 +43,7 @@ impl ProviderPoolDao {
             "SELECT uuid, provider_type, credential_data, name, is_healthy, is_disabled,
                     check_health, check_model_name, not_supported_models, usage_count, error_count,
                     last_used, last_error_time, last_error_message, last_health_check_time,
-                    last_health_check_model, created_at, updated_at
+                    last_health_check_model, created_at, updated_at, source
              FROM provider_pool_credentials
              WHERE provider_type = ?1
              ORDER BY created_at ASC",
@@ -70,7 +71,7 @@ impl ProviderPoolDao {
             "SELECT uuid, provider_type, credential_data, name, is_healthy, is_disabled,
                     check_health, check_model_name, not_supported_models, usage_count, error_count,
                     last_used, last_error_time, last_error_message, last_health_check_time,
-                    last_health_check_model, created_at, updated_at
+                    last_health_check_model, created_at, updated_at, source
              FROM provider_pool_credentials
              WHERE uuid = ?1",
         )?;
@@ -92,7 +93,7 @@ impl ProviderPoolDao {
             "SELECT uuid, provider_type, credential_data, name, is_healthy, is_disabled,
                     check_health, check_model_name, not_supported_models, usage_count, error_count,
                     last_used, last_error_time, last_error_message, last_health_check_time,
-                    last_health_check_model, created_at, updated_at
+                    last_health_check_model, created_at, updated_at, source
              FROM provider_pool_credentials
              WHERE name = ?1",
         )?;
@@ -126,14 +127,19 @@ impl ProviderPoolDao {
             serde_json::to_string(&cred.credential).unwrap_or_else(|_| "{}".to_string());
         let not_supported_models_json =
             serde_json::to_string(&cred.not_supported_models).unwrap_or_else(|_| "[]".to_string());
+        let source_str = match cred.source {
+            CredentialSource::Manual => "manual",
+            CredentialSource::Imported => "imported",
+            CredentialSource::Private => "private",
+        };
 
         conn.execute(
             "INSERT INTO provider_pool_credentials
              (uuid, provider_type, credential_data, name, is_healthy, is_disabled,
               check_health, check_model_name, not_supported_models, usage_count, error_count,
               last_used, last_error_time, last_error_message, last_health_check_time,
-              last_health_check_model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              last_health_check_model, created_at, updated_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 cred.uuid,
                 cred.provider_type.to_string(),
@@ -153,6 +159,7 @@ impl ProviderPoolDao {
                 cred.last_health_check_model,
                 cred.created_at.timestamp(),
                 cred.updated_at.timestamp(),
+                source_str,
             ],
         )?;
         Ok(())
@@ -304,6 +311,7 @@ impl ProviderPoolDao {
         let last_health_check_model: Option<String> = row.get(15)?;
         let created_at_ts: i64 = row.get(16)?;
         let updated_at_ts: i64 = row.get(17)?;
+        let source_str: Option<String> = row.get(18).ok();
 
         let provider_type: PoolProviderType =
             provider_type_str.parse().unwrap_or(PoolProviderType::Kiro);
@@ -315,6 +323,12 @@ impl ProviderPoolDao {
         let not_supported_models: Vec<String> = not_supported_models_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+
+        let source = match source_str.as_deref() {
+            Some("imported") => CredentialSource::Imported,
+            Some("private") => CredentialSource::Private,
+            _ => CredentialSource::Manual,
+        };
 
         Ok(ProviderCredential {
             uuid,
@@ -343,6 +357,7 @@ impl ProviderPoolDao {
                 .single()
                 .unwrap_or_default(),
             cached_token: None, // 从 get_token_cache 单独获取
+            source,
         })
     }
 

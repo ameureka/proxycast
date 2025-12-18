@@ -7,6 +7,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// 凭证来源枚举
+/// 用于标识凭证是如何添加到凭证池的
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    /// 手动添加（通过 UI 添加）
+    #[default]
+    Manual,
+    /// 导入（从文件导入）
+    Imported,
+    /// 私有凭证（从高级设置迁移）
+    Private,
+}
+
 /// Provider 类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +32,18 @@ pub enum PoolProviderType {
     OpenAI,
     Claude,
     Antigravity,
+    Vertex,
+    /// Gemini API Key (multi-account load balancing)
+    #[serde(rename = "gemini_api_key")]
+    GeminiApiKey,
+    /// Codex (OpenAI OAuth)
+    Codex,
+    /// Claude OAuth (Anthropic OAuth)
+    #[serde(rename = "claude_oauth")]
+    ClaudeOAuth,
+    /// iFlow
+    #[serde(rename = "iflow")]
+    IFlow,
 }
 
 impl std::fmt::Display for PoolProviderType {
@@ -29,6 +55,11 @@ impl std::fmt::Display for PoolProviderType {
             PoolProviderType::OpenAI => write!(f, "openai"),
             PoolProviderType::Claude => write!(f, "claude"),
             PoolProviderType::Antigravity => write!(f, "antigravity"),
+            PoolProviderType::Vertex => write!(f, "vertex"),
+            PoolProviderType::GeminiApiKey => write!(f, "gemini_api_key"),
+            PoolProviderType::Codex => write!(f, "codex"),
+            PoolProviderType::ClaudeOAuth => write!(f, "claude_oauth"),
+            PoolProviderType::IFlow => write!(f, "iflow"),
         }
     }
 }
@@ -44,6 +75,11 @@ impl std::str::FromStr for PoolProviderType {
             "openai" => Ok(PoolProviderType::OpenAI),
             "claude" => Ok(PoolProviderType::Claude),
             "antigravity" => Ok(PoolProviderType::Antigravity),
+            "vertex" => Ok(PoolProviderType::Vertex),
+            "gemini_api_key" => Ok(PoolProviderType::GeminiApiKey),
+            "codex" => Ok(PoolProviderType::Codex),
+            "claude_oauth" => Ok(PoolProviderType::ClaudeOAuth),
+            "iflow" => Ok(PoolProviderType::IFlow),
             _ => Err(format!("Invalid provider type: {s}")),
         }
     }
@@ -77,6 +113,30 @@ pub enum CredentialData {
         api_key: String,
         base_url: Option<String>,
     },
+    /// Vertex AI API Key 凭证
+    VertexKey {
+        api_key: String,
+        base_url: Option<String>,
+        /// Model alias mappings (alias -> upstream model name)
+        #[serde(default)]
+        model_aliases: std::collections::HashMap<String, String>,
+    },
+    /// Gemini API Key 凭证（多账号负载均衡）
+    GeminiApiKey {
+        api_key: String,
+        base_url: Option<String>,
+        /// 排除的模型列表（支持通配符）
+        #[serde(default)]
+        excluded_models: Vec<String>,
+    },
+    /// Codex OAuth 凭证（OpenAI Codex）
+    CodexOAuth { creds_file_path: String },
+    /// Claude OAuth 凭证（Anthropic OAuth）
+    ClaudeOAuth { creds_file_path: String },
+    /// iFlow OAuth 凭证
+    IFlowOAuth { creds_file_path: String },
+    /// iFlow Cookie 凭证
+    IFlowCookie { creds_file_path: String },
 }
 
 impl CredentialData {
@@ -105,6 +165,24 @@ impl CredentialData {
             CredentialData::ClaudeKey { api_key, .. } => {
                 format!("Claude: {}", mask_key(api_key))
             }
+            CredentialData::VertexKey { api_key, .. } => {
+                format!("Vertex AI: {}", mask_key(api_key))
+            }
+            CredentialData::GeminiApiKey { api_key, .. } => {
+                format!("Gemini API Key: {}", mask_key(api_key))
+            }
+            CredentialData::CodexOAuth { creds_file_path } => {
+                format!("Codex OAuth: {}", mask_path(creds_file_path))
+            }
+            CredentialData::ClaudeOAuth { creds_file_path } => {
+                format!("Claude OAuth: {}", mask_path(creds_file_path))
+            }
+            CredentialData::IFlowOAuth { creds_file_path } => {
+                format!("iFlow OAuth: {}", mask_path(creds_file_path))
+            }
+            CredentialData::IFlowCookie { creds_file_path } => {
+                format!("iFlow Cookie: {}", mask_path(creds_file_path))
+            }
         }
     }
 
@@ -117,7 +195,36 @@ impl CredentialData {
             CredentialData::AntigravityOAuth { .. } => PoolProviderType::Antigravity,
             CredentialData::OpenAIKey { .. } => PoolProviderType::OpenAI,
             CredentialData::ClaudeKey { .. } => PoolProviderType::Claude,
+            CredentialData::VertexKey { .. } => PoolProviderType::Vertex,
+            CredentialData::GeminiApiKey { .. } => PoolProviderType::GeminiApiKey,
+            CredentialData::CodexOAuth { .. } => PoolProviderType::Codex,
+            CredentialData::ClaudeOAuth { .. } => PoolProviderType::ClaudeOAuth,
+            CredentialData::IFlowOAuth { .. } => PoolProviderType::IFlow,
+            CredentialData::IFlowCookie { .. } => PoolProviderType::IFlow,
         }
+    }
+}
+
+/// 通配符模式匹配
+///
+/// 支持的通配符模式：
+/// - 精确匹配: `claude-sonnet-4-5`
+/// - 前缀匹配: `claude-*`
+/// - 后缀匹配: `*-preview`
+/// - 包含匹配: `*flash*`
+pub fn pattern_matches(pattern: &str, model: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == model;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+
+    match parts.as_slice() {
+        [prefix, ""] => model.starts_with(prefix),
+        ["", suffix] => model.ends_with(suffix),
+        ["", middle, ""] => model.contains(middle),
+        [prefix, suffix] => model.starts_with(prefix) && model.ends_with(suffix),
+        _ => false,
     }
 }
 
@@ -169,6 +276,9 @@ pub struct ProviderCredential {
     /// Token 缓存信息
     #[serde(default)]
     pub cached_token: Option<CachedTokenInfo>,
+    /// 凭证来源（手动添加/导入/私有）
+    #[serde(default)]
+    pub source: CredentialSource,
 }
 
 fn default_true() -> bool {
@@ -199,7 +309,19 @@ impl ProviderCredential {
             created_at: now,
             updated_at: now,
             cached_token: None,
+            source: CredentialSource::Manual,
         }
+    }
+
+    /// 创建带来源的新凭证
+    pub fn new_with_source(
+        provider_type: PoolProviderType,
+        credential: CredentialData,
+        source: CredentialSource,
+    ) -> Self {
+        let mut cred = Self::new(provider_type, credential);
+        cred.source = source;
+        cred
     }
 
     /// 是否可用（健康且未禁用）
@@ -208,8 +330,29 @@ impl ProviderCredential {
     }
 
     /// 是否支持指定模型
+    ///
+    /// 检查两个来源的排除列表：
+    /// 1. `not_supported_models` - 通用的不支持模型列表（精确匹配）
+    /// 2. `excluded_models` - 来自 CredentialData::GeminiApiKey 的排除列表（支持通配符）
     pub fn supports_model(&self, model: &str) -> bool {
-        !self.not_supported_models.contains(&model.to_string())
+        // 检查通用的不支持模型列表（精确匹配）
+        if self.not_supported_models.contains(&model.to_string()) {
+            return false;
+        }
+
+        // 检查 GeminiApiKey 的 excluded_models（支持通配符）
+        if let CredentialData::GeminiApiKey {
+            excluded_models, ..
+        } = &self.credential
+        {
+            for pattern in excluded_models {
+                if pattern_matches(pattern, model) {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// 标记为健康
@@ -379,8 +522,14 @@ pub fn get_default_check_model(provider_type: PoolProviderType) -> &'static str 
         PoolProviderType::Gemini => "gemini-2.5-flash",
         PoolProviderType::Qwen => "qwen3-coder-flash",
         PoolProviderType::OpenAI => "gpt-3.5-turbo",
-        PoolProviderType::Claude => "claude-3-5-haiku-latest",
+        // 使用 claude-sonnet-4-5-20250929，兼容更多代理服务器
+        PoolProviderType::Claude => "claude-sonnet-4-5-20250929",
         PoolProviderType::Antigravity => "gemini-3-pro-preview",
+        PoolProviderType::Vertex => "gemini-2.0-flash",
+        PoolProviderType::GeminiApiKey => "gemini-2.5-flash",
+        PoolProviderType::Codex => "gpt-4o-mini",
+        PoolProviderType::ClaudeOAuth => "claude-sonnet-4-5-20250929",
+        PoolProviderType::IFlow => "deepseek-chat",
     }
 }
 
@@ -408,6 +557,12 @@ pub struct CredentialDisplay {
     pub token_cache_status: Option<TokenCacheStatus>,
     pub created_at: String,
     pub updated_at: String,
+    /// 凭证来源（手动添加/导入/私有）
+    pub source: CredentialSource,
+    /// API Key 凭证的 base_url（仅用于 OpenAI/Claude API Key 类型）
+    pub base_url: Option<String>,
+    /// API Key 凭证的完整 api_key（仅用于 OpenAI/Claude API Key 类型，用于编辑）
+    pub api_key: Option<String>,
 }
 
 /// 获取凭证类型字符串
@@ -419,6 +574,12 @@ fn get_credential_type(cred: &CredentialData) -> String {
         CredentialData::AntigravityOAuth { .. } => "antigravity_oauth".to_string(),
         CredentialData::OpenAIKey { .. } => "openai_key".to_string(),
         CredentialData::ClaudeKey { .. } => "claude_key".to_string(),
+        CredentialData::VertexKey { .. } => "vertex_key".to_string(),
+        CredentialData::GeminiApiKey { .. } => "gemini_api_key".to_string(),
+        CredentialData::CodexOAuth { .. } => "codex_oauth".to_string(),
+        CredentialData::ClaudeOAuth { .. } => "claude_oauth".to_string(),
+        CredentialData::IFlowOAuth { .. } => "iflow_oauth".to_string(),
+        CredentialData::IFlowCookie { .. } => "iflow_cookie".to_string(),
     }
 }
 
@@ -433,6 +594,28 @@ pub fn get_oauth_creds_path(cred: &CredentialData) -> Option<String> {
         CredentialData::AntigravityOAuth {
             creds_file_path, ..
         } => Some(creds_file_path.clone()),
+        CredentialData::CodexOAuth { creds_file_path } => Some(creds_file_path.clone()),
+        CredentialData::ClaudeOAuth { creds_file_path } => Some(creds_file_path.clone()),
+        CredentialData::IFlowOAuth { creds_file_path } => Some(creds_file_path.clone()),
+        CredentialData::IFlowCookie { creds_file_path } => Some(creds_file_path.clone()),
+        _ => None,
+    }
+}
+
+/// 从 CredentialData 中提取 base_url（仅适用于 API Key 类型）
+fn get_base_url(cred: &CredentialData) -> Option<String> {
+    match cred {
+        CredentialData::OpenAIKey { base_url, .. } => base_url.clone(),
+        CredentialData::ClaudeKey { base_url, .. } => base_url.clone(),
+        _ => None,
+    }
+}
+
+/// 从 CredentialData 中提取 api_key（仅适用于 API Key 类型）
+fn get_api_key(cred: &CredentialData) -> Option<String> {
+    match cred {
+        CredentialData::OpenAIKey { api_key, .. } => Some(api_key.clone()),
+        CredentialData::ClaudeKey { api_key, .. } => Some(api_key.clone()),
         _ => None,
     }
 }
@@ -472,6 +655,9 @@ impl From<&ProviderCredential> for CredentialDisplay {
             token_cache_status,
             created_at: cred.created_at.to_rfc3339(),
             updated_at: cred.updated_at.to_rfc3339(),
+            source: cred.source,
+            base_url: get_base_url(&cred.credential),
+            api_key: get_api_key(&cred.credential),
         }
     }
 }
@@ -525,6 +711,261 @@ pub struct UpdateCredentialRequest {
     pub new_creds_file_path: Option<String>,
     /// OAuth相关：新的project_id（仅适用于Gemini）
     pub new_project_id: Option<String>,
+    /// API Key 相关：新的 base_url（仅适用于 API Key 凭证）
+    pub new_base_url: Option<String>,
+    /// API Key 相关：新的 api_key（仅适用于 API Key 凭证）
+    pub new_api_key: Option<String>,
 }
 
 pub type ProviderPools = HashMap<PoolProviderType, Vec<ProviderCredential>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pattern_matches_exact() {
+        assert!(pattern_matches("gemini-2.5-pro", "gemini-2.5-pro"));
+        assert!(!pattern_matches("gemini-2.5-pro", "gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_pattern_matches_prefix() {
+        assert!(pattern_matches("gemini-*", "gemini-2.5-pro"));
+        assert!(pattern_matches("gemini-*", "gemini-2.5-flash"));
+        assert!(!pattern_matches("gemini-*", "claude-sonnet"));
+    }
+
+    #[test]
+    fn test_pattern_matches_suffix() {
+        assert!(pattern_matches("*-preview", "gemini-3-pro-preview"));
+        assert!(pattern_matches("*-preview", "claude-preview"));
+        assert!(!pattern_matches("*-preview", "gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn test_pattern_matches_contains() {
+        assert!(pattern_matches("*flash*", "gemini-2.5-flash"));
+        assert!(pattern_matches("*flash*", "gemini-2.5-flash-lite"));
+        assert!(!pattern_matches("*flash*", "gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn test_pattern_matches_prefix_and_suffix() {
+        assert!(pattern_matches("gemini-*-pro", "gemini-2.5-pro"));
+        assert!(pattern_matches("gemini-*-pro", "gemini-3-pro"));
+        assert!(!pattern_matches("gemini-*-pro", "gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_supports_model_not_supported_models() {
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::Kiro,
+            credential: CredentialData::KiroOAuth {
+                creds_file_path: "/path/to/creds".to_string(),
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec!["claude-opus".to_string()],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        assert!(!cred.supports_model("claude-opus"));
+        assert!(cred.supports_model("claude-sonnet"));
+    }
+
+    #[test]
+    fn test_supports_model_gemini_api_key_excluded_models_exact() {
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::GeminiApiKey,
+            credential: CredentialData::GeminiApiKey {
+                api_key: "test-key".to_string(),
+                base_url: None,
+                excluded_models: vec!["gemini-2.5-pro".to_string()],
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec![],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        // Exact match exclusion
+        assert!(!cred.supports_model("gemini-2.5-pro"));
+        // Not excluded
+        assert!(cred.supports_model("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn test_supports_model_gemini_api_key_excluded_models_wildcard() {
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::GeminiApiKey,
+            credential: CredentialData::GeminiApiKey {
+                api_key: "test-key".to_string(),
+                base_url: None,
+                excluded_models: vec!["gemini-2.5-*".to_string(), "*-preview".to_string()],
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec![],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        // Prefix wildcard exclusion
+        assert!(!cred.supports_model("gemini-2.5-pro"));
+        assert!(!cred.supports_model("gemini-2.5-flash"));
+        // Suffix wildcard exclusion
+        assert!(!cred.supports_model("gemini-3-pro-preview"));
+        // Not excluded
+        assert!(cred.supports_model("gemini-2.0-flash"));
+        assert!(cred.supports_model("gemini-3-pro"));
+    }
+
+    #[test]
+    fn test_supports_model_gemini_api_key_excluded_models_contains() {
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::GeminiApiKey,
+            credential: CredentialData::GeminiApiKey {
+                api_key: "test-key".to_string(),
+                base_url: None,
+                excluded_models: vec!["*flash*".to_string()],
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec![],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        // Contains wildcard exclusion
+        assert!(!cred.supports_model("gemini-2.5-flash"));
+        assert!(!cred.supports_model("gemini-2.5-flash-lite"));
+        // Not excluded
+        assert!(cred.supports_model("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn test_supports_model_combined_exclusions() {
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::GeminiApiKey,
+            credential: CredentialData::GeminiApiKey {
+                api_key: "test-key".to_string(),
+                base_url: None,
+                excluded_models: vec!["gemini-2.5-*".to_string()],
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec!["gemini-3-pro".to_string()],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        // Excluded by not_supported_models (exact match)
+        assert!(!cred.supports_model("gemini-3-pro"));
+        // Excluded by excluded_models (wildcard)
+        assert!(!cred.supports_model("gemini-2.5-pro"));
+        assert!(!cred.supports_model("gemini-2.5-flash"));
+        // Not excluded
+        assert!(cred.supports_model("gemini-2.0-flash"));
+    }
+
+    #[test]
+    fn test_supports_model_non_gemini_api_key_ignores_excluded_models() {
+        // For non-GeminiApiKey credentials, excluded_models in CredentialData is not checked
+        let cred = ProviderCredential {
+            uuid: "test-uuid".to_string(),
+            provider_type: PoolProviderType::Kiro,
+            credential: CredentialData::KiroOAuth {
+                creds_file_path: "/path/to/creds".to_string(),
+            },
+            name: None,
+            is_healthy: true,
+            is_disabled: false,
+            check_health: true,
+            check_model_name: None,
+            not_supported_models: vec![],
+            usage_count: 0,
+            error_count: 0,
+            last_used: None,
+            last_error_time: None,
+            last_error_message: None,
+            last_health_check_time: None,
+            last_health_check_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cached_token: None,
+            source: CredentialSource::Manual,
+        };
+
+        // All models should be supported since not_supported_models is empty
+        assert!(cred.supports_model("claude-sonnet"));
+        assert!(cred.supports_model("claude-opus"));
+    }
+}

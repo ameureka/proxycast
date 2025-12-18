@@ -2,6 +2,7 @@ pub mod config_cmd;
 pub mod injection_cmd;
 pub mod mcp_cmd;
 pub mod oauth_cmd;
+pub mod plugin_cmd;
 pub mod prompt_cmd;
 pub mod provider_pool_cmd;
 pub mod resilience_cmd;

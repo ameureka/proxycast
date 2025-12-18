@@ -46,11 +46,26 @@ impl OpenAICustomProvider {
         self.config
             .base_url
             .clone()
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+            .unwrap_or_else(|| "https://api.openai.com".to_string())
     }
 
     pub fn is_configured(&self) -> bool {
         self.config.api_key.is_some() && self.config.enabled
+    }
+
+    /// 构建完整的 API URL
+    /// 智能处理用户输入的 base_url，无论是否带 /v1 都能正确工作
+    fn build_url(&self, endpoint: &str) -> String {
+        let base = self.get_base_url();
+        let base = base.trim_end_matches('/');
+
+        // 如果用户输入了带 /v1 的 URL，直接拼接 endpoint
+        // 否则拼接 /v1/endpoint
+        if base.ends_with("/v1") {
+            format!("{}/{}", base, endpoint)
+        } else {
+            format!("{}/v1/{}", base, endpoint)
+        }
     }
 
     /// 调用 OpenAI API（使用类型化请求）
@@ -64,8 +79,7 @@ impl OpenAICustomProvider {
             .as_ref()
             .ok_or("OpenAI API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/chat/completions");
+        let url = self.build_url("chat/completions");
 
         let resp = self
             .client
@@ -89,8 +103,7 @@ impl OpenAICustomProvider {
             .as_ref()
             .ok_or("OpenAI API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/chat/completions");
+        let url = self.build_url("chat/completions");
 
         let resp = self
             .client
@@ -111,8 +124,7 @@ impl OpenAICustomProvider {
             .as_ref()
             .ok_or("OpenAI API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/models");
+        let url = self.build_url("models");
 
         let resp = self
             .client

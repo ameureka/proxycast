@@ -10,8 +10,14 @@ import {
   AlertTriangle,
   RefreshCw,
   Settings,
+  Upload,
+  Lock,
+  User,
 } from "lucide-react";
-import type { CredentialDisplay } from "@/lib/api/providerPool";
+import type {
+  CredentialDisplay,
+  CredentialSource,
+} from "@/lib/api/providerPool";
 
 interface CredentialCardProps {
   credential: CredentialDisplay;
@@ -57,9 +63,43 @@ export function CredentialCard({
       antigravity_oauth: "OAuth",
       openai_key: "API Key",
       claude_key: "API Key",
+      codex_oauth: "OAuth",
+      claude_oauth: "OAuth",
+      iflow_oauth: "OAuth",
+      iflow_cookie: "Cookie",
     };
     return labels[type] || type;
   };
+
+  const getSourceLabel = (source: CredentialSource) => {
+    const labels: Record<
+      CredentialSource,
+      { text: string; icon: typeof User; color: string }
+    > = {
+      manual: {
+        text: "手动添加",
+        icon: User,
+        color:
+          "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+      },
+      imported: {
+        text: "导入",
+        icon: Upload,
+        color:
+          "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+      },
+      private: {
+        text: "私有",
+        icon: Lock,
+        color:
+          "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
+      },
+    };
+    return labels[source] || labels.manual;
+  };
+
+  const sourceInfo = getSourceLabel(credential.source || "manual");
+  const SourceIcon = sourceInfo.icon;
 
   const isHealthy = credential.is_healthy && !credential.is_disabled;
   const hasError = credential.error_count > 0;
@@ -103,6 +143,12 @@ export function CredentialCard({
             </h4>
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium">
               {getCredentialTypeLabel(credential.credential_type)}
+            </span>
+            <span
+              className={`rounded-full px-2 py-0.5 text-xs font-medium inline-flex items-center gap-1 whitespace-nowrap shrink-0 ${sourceInfo.color}`}
+            >
+              <SourceIcon className="h-3 w-3 shrink-0" />
+              {sourceInfo.text}
             </span>
           </div>
           <p className="text-xs text-muted-foreground font-mono truncate">

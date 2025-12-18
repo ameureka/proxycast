@@ -197,6 +197,40 @@ impl TokenCacheService {
                     last_refresh_error: None,
                 })
             }
+            CredentialData::VertexKey { api_key, .. } => {
+                // API Key 不需要刷新，直接返回
+                Ok(CachedTokenInfo {
+                    access_token: Some(api_key.clone()),
+                    refresh_token: None,
+                    expiry_time: None, // 永不过期
+                    last_refresh: Some(Utc::now()),
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
+            CredentialData::GeminiApiKey { api_key, .. } => {
+                // API Key 不需要刷新，直接返回
+                Ok(CachedTokenInfo {
+                    access_token: Some(api_key.clone()),
+                    refresh_token: None,
+                    expiry_time: None, // 永不过期
+                    last_refresh: Some(Utc::now()),
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
+            CredentialData::CodexOAuth { creds_file_path } => {
+                self.refresh_codex(creds_file_path).await
+            }
+            CredentialData::ClaudeOAuth { creds_file_path } => {
+                self.refresh_claude_oauth(creds_file_path).await
+            }
+            CredentialData::IFlowOAuth { creds_file_path } => {
+                self.refresh_iflow_oauth(creds_file_path).await
+            }
+            CredentialData::IFlowCookie { creds_file_path } => {
+                self.refresh_iflow_cookie(creds_file_path).await
+            }
         }
     }
 
@@ -311,6 +345,145 @@ impl TokenCacheService {
         Ok(CachedTokenInfo {
             access_token: Some(token),
             refresh_token: provider.credentials.refresh_token.clone(),
+            expiry_time: Some(expiry_time),
+            last_refresh: Some(Utc::now()),
+            refresh_error_count: 0,
+            last_refresh_error: None,
+        })
+    }
+
+    /// 刷新 Codex Token
+    async fn refresh_codex(&self, creds_path: &str) -> Result<CachedTokenInfo, String> {
+        use crate::providers::codex::CodexProvider;
+
+        let mut provider = CodexProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 Codex 凭证失败: {}", e))?;
+
+        let token = provider
+            .refresh_token_with_retry(3)
+            .await
+            .map_err(|e| format!("刷新 Codex Token 失败: {}", e))?;
+
+        // 解析过期时间
+        let expiry_time = provider
+            .credentials
+            .expires_at
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(50));
+
+        Ok(CachedTokenInfo {
+            access_token: Some(token),
+            refresh_token: provider.credentials.refresh_token.clone(),
+            expiry_time: Some(expiry_time),
+            last_refresh: Some(Utc::now()),
+            refresh_error_count: 0,
+            last_refresh_error: None,
+        })
+    }
+
+    /// 刷新 Claude OAuth Token
+    async fn refresh_claude_oauth(&self, creds_path: &str) -> Result<CachedTokenInfo, String> {
+        use crate::providers::claude_oauth::ClaudeOAuthProvider;
+
+        let mut provider = ClaudeOAuthProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 Claude OAuth 凭证失败: {}", e))?;
+
+        let token = provider
+            .refresh_token_with_retry(3)
+            .await
+            .map_err(|e| format!("刷新 Claude OAuth Token 失败: {}", e))?;
+
+        // 解析过期时间
+        let expiry_time = provider
+            .credentials
+            .expire
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(50));
+
+        Ok(CachedTokenInfo {
+            access_token: Some(token),
+            refresh_token: provider.credentials.refresh_token.clone(),
+            expiry_time: Some(expiry_time),
+            last_refresh: Some(Utc::now()),
+            refresh_error_count: 0,
+            last_refresh_error: None,
+        })
+    }
+
+    /// 刷新 iFlow OAuth Token
+    async fn refresh_iflow_oauth(&self, creds_path: &str) -> Result<CachedTokenInfo, String> {
+        use crate::providers::iflow::IFlowProvider;
+
+        let mut provider = IFlowProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 iFlow OAuth 凭证失败: {}", e))?;
+
+        let token = provider
+            .refresh_token_with_retry(3)
+            .await
+            .map_err(|e| format!("刷新 iFlow OAuth Token 失败: {}", e))?;
+
+        // 解析过期时间
+        let expiry_time = provider
+            .credentials
+            .expire
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(50));
+
+        Ok(CachedTokenInfo {
+            access_token: Some(token),
+            refresh_token: provider.credentials.refresh_token.clone(),
+            expiry_time: Some(expiry_time),
+            last_refresh: Some(Utc::now()),
+            refresh_error_count: 0,
+            last_refresh_error: None,
+        })
+    }
+
+    /// 刷新 iFlow Cookie Token
+    async fn refresh_iflow_cookie(&self, creds_path: &str) -> Result<CachedTokenInfo, String> {
+        use crate::providers::iflow::IFlowProvider;
+
+        let mut provider = IFlowProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 iFlow Cookie 凭证失败: {}", e))?;
+
+        // iFlow Cookie 凭证使用 API Key，不需要刷新 OAuth Token
+        // 直接从凭证中获取 API Key
+        let api_key = provider
+            .credentials
+            .api_key
+            .clone()
+            .ok_or_else(|| "iFlow Cookie 凭证中没有 API Key".to_string())?;
+
+        // 解析过期时间
+        let expiry_time = provider
+            .credentials
+            .expire
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::days(30)); // Cookie 通常有效期较长
+
+        Ok(CachedTokenInfo {
+            access_token: Some(api_key),
+            refresh_token: None,
             expiry_time: Some(expiry_time),
             last_refresh: Some(Utc::now()),
             refresh_error_count: 0,
@@ -463,6 +636,113 @@ impl TokenCacheService {
                 refresh_error_count: 0,
                 last_refresh_error: None,
             }),
+            CredentialData::VertexKey { api_key, .. } => Ok(CachedTokenInfo {
+                access_token: Some(api_key.clone()),
+                refresh_token: None,
+                expiry_time: None,
+                last_refresh: None,
+                refresh_error_count: 0,
+                last_refresh_error: None,
+            }),
+            CredentialData::GeminiApiKey { api_key, .. } => Ok(CachedTokenInfo {
+                access_token: Some(api_key.clone()),
+                refresh_token: None,
+                expiry_time: None,
+                last_refresh: None,
+                refresh_error_count: 0,
+                last_refresh_error: None,
+            }),
+            CredentialData::CodexOAuth { creds_file_path } => {
+                let content = tokio::fs::read_to_string(creds_file_path)
+                    .await
+                    .map_err(|e| format!("读取 Codex 凭证文件失败: {}", e))?;
+                let creds: serde_json::Value =
+                    serde_json::from_str(&content).map_err(|e| format!("解析凭证失败: {}", e))?;
+
+                let access_token = creds["access_token"].as_str().map(|s| s.to_string());
+                let refresh_token = creds["refresh_token"].as_str().map(|s| s.to_string());
+                let expiry_time = creds["expired"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok(CachedTokenInfo {
+                    access_token,
+                    refresh_token,
+                    expiry_time,
+                    last_refresh: None,
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
+            CredentialData::ClaudeOAuth { creds_file_path } => {
+                let content = tokio::fs::read_to_string(creds_file_path)
+                    .await
+                    .map_err(|e| format!("读取 Claude OAuth 凭证文件失败: {}", e))?;
+                let creds: serde_json::Value =
+                    serde_json::from_str(&content).map_err(|e| format!("解析凭证失败: {}", e))?;
+
+                let access_token = creds["access_token"].as_str().map(|s| s.to_string());
+                let refresh_token = creds["refresh_token"].as_str().map(|s| s.to_string());
+                let expiry_time = creds["expire"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok(CachedTokenInfo {
+                    access_token,
+                    refresh_token,
+                    expiry_time,
+                    last_refresh: None,
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
+            CredentialData::IFlowOAuth { creds_file_path } => {
+                let content = tokio::fs::read_to_string(creds_file_path)
+                    .await
+                    .map_err(|e| format!("读取 iFlow OAuth 凭证文件失败: {}", e))?;
+                let creds: serde_json::Value =
+                    serde_json::from_str(&content).map_err(|e| format!("解析凭证失败: {}", e))?;
+
+                let access_token = creds["access_token"].as_str().map(|s| s.to_string());
+                let refresh_token = creds["refresh_token"].as_str().map(|s| s.to_string());
+                let expiry_time = creds["expire"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok(CachedTokenInfo {
+                    access_token,
+                    refresh_token,
+                    expiry_time,
+                    last_refresh: None,
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
+            CredentialData::IFlowCookie { creds_file_path } => {
+                let content = tokio::fs::read_to_string(creds_file_path)
+                    .await
+                    .map_err(|e| format!("读取 iFlow Cookie 凭证文件失败: {}", e))?;
+                let creds: serde_json::Value =
+                    serde_json::from_str(&content).map_err(|e| format!("解析凭证失败: {}", e))?;
+
+                let api_key = creds["api_key"].as_str().map(|s| s.to_string());
+                let expiry_time = creds["expire"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                Ok(CachedTokenInfo {
+                    access_token: api_key,
+                    refresh_token: None,
+                    expiry_time,
+                    last_refresh: None,
+                    refresh_error_count: 0,
+                    last_refresh_error: None,
+                })
+            }
         }
     }
 

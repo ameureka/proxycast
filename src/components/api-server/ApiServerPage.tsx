@@ -592,7 +592,11 @@ export function ApiServerPage() {
               const currentOverview = poolOverview.find(
                 (o) => o.provider_type === defaultProvider,
               );
-              const credentials = currentOverview?.credentials || [];
+              const allCredentials = currentOverview?.credentials || [];
+              // 过滤掉禁用的凭证，只显示启用的凭证
+              const credentials = allCredentials.filter(
+                (cred) => !cred.is_disabled,
+              );
               if (credentials.length === 0) {
                 return (
                   <div className="mt-4 rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">

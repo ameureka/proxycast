@@ -23,6 +23,9 @@ pub struct Credential {
     pub status: CredentialStatus,
     /// 统计信息
     pub stats: CredentialStats,
+    /// Per-Key 代理 URL（覆盖全局代理）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 impl Credential {
@@ -36,7 +39,24 @@ impl Credential {
             last_used: None,
             status: CredentialStatus::Active,
             stats: CredentialStats::default(),
+            proxy_url: None,
         }
+    }
+
+    /// 创建带代理的凭证
+    pub fn with_proxy(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置代理 URL
+    pub fn set_proxy_url(&mut self, proxy_url: Option<String>) {
+        self.proxy_url = proxy_url;
+    }
+
+    /// 获取代理 URL
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.proxy_url.as_deref()
     }
 
     /// 检查凭证是否可用（活跃状态）

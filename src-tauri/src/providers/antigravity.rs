@@ -90,8 +90,23 @@ pub struct AntigravityCredentials {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub token_type: Option<String>,
+    /// 过期时间戳（毫秒）- 兼容旧格式
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expiry_date: Option<i64>,
+    /// 过期时间（RFC3339 格式）- 与 CLIProxyAPI 兼容
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expire: Option<String>,
     pub scope: Option<String>,
+    /// 最后刷新时间（RFC3339 格式）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<String>,
+    /// 凭证类型标识
+    #[serde(default = "default_antigravity_type", rename = "type")]
+    pub cred_type: String,
+}
+
+fn default_antigravity_type() -> String {
+    "antigravity".to_string()
 }
 
 impl Default for AntigravityCredentials {
@@ -101,7 +116,10 @@ impl Default for AntigravityCredentials {
             refresh_token: None,
             token_type: Some("Bearer".to_string()),
             expiry_date: None,
+            expire: None,
             scope: None,
+            last_refresh: None,
+            cred_type: default_antigravity_type(),
         }
     }
 }
@@ -181,6 +199,17 @@ impl AntigravityProvider {
         if self.credentials.access_token.is_none() {
             return false;
         }
+
+        // 优先检查 RFC3339 格式的过期时间
+        if let Some(expire_str) = &self.credentials.expire {
+            if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expire_str) {
+                let now = chrono::Utc::now();
+                // Token valid if more than 5 minutes until expiry
+                return expires > now + chrono::Duration::minutes(5);
+            }
+        }
+
+        // 兼容旧的毫秒时间戳格式
         if let Some(expiry) = self.credentials.expiry_date {
             let now = chrono::Utc::now().timestamp_millis();
             // Token valid if more than 5 minutes until expiry
@@ -190,6 +219,16 @@ impl AntigravityProvider {
     }
 
     pub fn is_token_expiring_soon(&self) -> bool {
+        // 优先检查 RFC3339 格式的过期时间
+        if let Some(expire_str) = &self.credentials.expire {
+            if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expire_str) {
+                let now = chrono::Utc::now();
+                let refresh_skew = chrono::Duration::seconds(REFRESH_SKEW);
+                return expires <= now + refresh_skew;
+            }
+        }
+
+        // 兼容旧的毫秒时间戳格式
         if let Some(expiry) = self.credentials.expiry_date {
             let now = chrono::Utc::now().timestamp_millis();
             let refresh_skew_ms = REFRESH_SKEW * 1000;
@@ -233,15 +272,20 @@ impl AntigravityProvider {
 
         self.credentials.access_token = Some(new_token.to_string());
 
+        // 更新过期时间（同时保存两种格式以兼容）
         if let Some(expires_in) = data["expires_in"].as_i64() {
-            self.credentials.expiry_date =
-                Some(chrono::Utc::now().timestamp_millis() + expires_in * 1000);
+            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
+            self.credentials.expire = Some(expires_at.to_rfc3339());
+            self.credentials.expiry_date = Some(expires_at.timestamp_millis());
         }
 
         // 如果返回了新的 refresh_token，也更新它
         if let Some(new_refresh) = data["refresh_token"].as_str() {
             self.credentials.refresh_token = Some(new_refresh.to_string());
         }
+
+        // 更新最后刷新时间（RFC3339 格式）
+        self.credentials.last_refresh = Some(chrono::Utc::now().to_rfc3339());
 
         // Save refreshed credentials
         self.save_credentials().await?;

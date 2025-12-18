@@ -5,9 +5,11 @@
 use super::health::{HealthCheckConfig, HealthChecker};
 use super::pool::{CredentialPool, PoolError};
 use super::types::Credential;
+use crate::proxy::ProxyClientFactory;
 use crate::ProviderType;
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,6 +36,15 @@ pub struct CooldownInfo {
     pub reason: String,
 }
 
+/// 凭证选择结果 - 包含凭证和对应的 HTTP 客户端
+#[derive(Debug)]
+pub struct CredentialSelection {
+    /// 选中的凭证
+    pub credential: Credential,
+    /// 配置了代理的 HTTP 客户端
+    pub client: Client,
+}
+
 /// 负载均衡器 - 管理多个 Provider 的凭证池
 pub struct LoadBalancer {
     /// 负载均衡策略
@@ -44,6 +55,8 @@ pub struct LoadBalancer {
     round_robin_indices: DashMap<ProviderType, AtomicUsize>,
     /// 健康检查器
     health_checker: HealthChecker,
+    /// 代理客户端工厂
+    proxy_factory: ProxyClientFactory,
 }
 
 impl LoadBalancer {
@@ -54,6 +67,7 @@ impl LoadBalancer {
             pools: DashMap::new(),
             round_robin_indices: DashMap::new(),
             health_checker: HealthChecker::with_defaults(),
+            proxy_factory: ProxyClientFactory::new(),
         }
     }
 
@@ -69,7 +83,24 @@ impl LoadBalancer {
             pools: DashMap::new(),
             round_robin_indices: DashMap::new(),
             health_checker: HealthChecker::new(health_config),
+            proxy_factory: ProxyClientFactory::new(),
         }
+    }
+
+    /// 创建带全局代理的负载均衡器
+    pub fn with_global_proxy(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_factory = self.proxy_factory.with_global_proxy(proxy_url);
+        self
+    }
+
+    /// 设置全局代理
+    pub fn set_global_proxy(&mut self, proxy_url: Option<String>) {
+        self.proxy_factory = ProxyClientFactory::new().with_global_proxy(proxy_url);
+    }
+
+    /// 获取代理客户端工厂
+    pub fn proxy_factory(&self) -> &ProxyClientFactory {
+        &self.proxy_factory
     }
 
     /// 获取健康检查器
@@ -127,6 +158,149 @@ impl LoadBalancer {
             BalanceStrategy::LeastUsed => self.select_least_used(&pool),
             BalanceStrategy::Random => self.select_random(&pool),
         }
+    }
+
+    /// 选择下一个可用凭证并创建配置了代理的 HTTP 客户端
+    ///
+    /// 代理选择逻辑：
+    /// 1. 如果凭证有 proxy_url，使用 Per-Key 代理
+    /// 2. 否则，使用全局代理（如果配置了）
+    /// 3. 否则，不使用代理
+    ///
+    /// # 错误
+    /// - 如果 Provider 未注册，返回 `PoolError::EmptyPool`
+    /// - 如果没有可用凭证，返回 `PoolError::NoAvailableCredential`
+    /// - 如果代理配置无效，返回 `PoolError::CredentialNotFound`（包含错误信息）
+    pub fn select_with_client(
+        &self,
+        provider: ProviderType,
+    ) -> Result<CredentialSelection, PoolError> {
+        let credential = self.select(provider)?;
+
+        // 使用凭证的 proxy_url 或回退到全局代理
+        let client = self
+            .proxy_factory
+            .create_client(credential.proxy_url())
+            .map_err(|e| PoolError::CredentialNotFound(format!("代理配置错误: {}", e)))?;
+
+        Ok(CredentialSelection { credential, client })
+    }
+
+    /// 为指定凭证创建配置了代理的 HTTP 客户端
+    ///
+    /// # 参数
+    /// - `credential`: 凭证引用
+    ///
+    /// # 返回
+    /// - `Ok(Client)`: 配置了代理的 HTTP 客户端
+    /// - `Err(PoolError)`: 代理配置错误
+    pub fn create_client_for_credential(
+        &self,
+        credential: &Credential,
+    ) -> Result<Client, PoolError> {
+        self.proxy_factory
+            .create_client(credential.proxy_url())
+            .map_err(|e| PoolError::CredentialNotFound(format!("代理配置错误: {}", e)))
+    }
+
+    /// 选择下一个可用凭证，支持代理失败时的故障转移
+    ///
+    /// 当代理连接失败时，自动尝试下一个可用凭证。
+    /// 最多尝试 `max_attempts` 次（默认为池中凭证数量）。
+    ///
+    /// # 参数
+    /// - `provider`: Provider 类型
+    /// - `max_attempts`: 最大尝试次数（None 表示尝试所有可用凭证）
+    ///
+    /// # 返回
+    /// - `Ok(CredentialSelection)`: 成功选择的凭证和客户端
+    /// - `Err(PoolError)`: 所有凭证都失败
+    pub fn select_with_failover(
+        &self,
+        provider: ProviderType,
+        max_attempts: Option<usize>,
+    ) -> Result<CredentialSelection, PoolError> {
+        let pool = self.pools.get(&provider).ok_or(PoolError::EmptyPool)?;
+        pool.refresh_cooldowns();
+
+        let active_count = pool.active_count();
+        if active_count == 0 {
+            return Err(PoolError::NoAvailableCredential);
+        }
+
+        let attempts = max_attempts.unwrap_or(active_count).min(active_count);
+        let mut last_error = None;
+        let mut tried_ids = std::collections::HashSet::new();
+
+        for _ in 0..attempts {
+            // 选择下一个凭证
+            let credential = match self.select(provider) {
+                Ok(cred) => cred,
+                Err(e) => {
+                    last_error = Some(e);
+                    break;
+                }
+            };
+
+            // 避免重复尝试同一个凭证
+            if tried_ids.contains(&credential.id) {
+                continue;
+            }
+            tried_ids.insert(credential.id.clone());
+
+            // 尝试创建客户端
+            match self.proxy_factory.create_client(credential.proxy_url()) {
+                Ok(client) => {
+                    return Ok(CredentialSelection { credential, client });
+                }
+                Err(e) => {
+                    // 记录警告并继续尝试下一个凭证
+                    tracing::warn!(
+                        credential_id = %credential.id,
+                        proxy_url = ?credential.proxy_url(),
+                        error = %e,
+                        "代理连接失败，尝试下一个凭证"
+                    );
+                    last_error = Some(PoolError::CredentialNotFound(format!(
+                        "凭证 {} 的代理配置错误: {}",
+                        credential.id, e
+                    )));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(PoolError::NoAvailableCredential))
+    }
+
+    /// 报告代理连接失败并尝试故障转移
+    ///
+    /// 当代理连接失败时调用此方法，它会：
+    /// 1. 记录失败
+    /// 2. 尝试选择下一个可用凭证
+    ///
+    /// # 参数
+    /// - `provider`: Provider 类型
+    /// - `failed_credential_id`: 失败的凭证 ID
+    ///
+    /// # 返回
+    /// - `Ok(CredentialSelection)`: 故障转移成功，返回新的凭证和客户端
+    /// - `Err(PoolError)`: 故障转移失败
+    pub fn failover_on_proxy_error(
+        &self,
+        provider: ProviderType,
+        failed_credential_id: &str,
+    ) -> Result<CredentialSelection, PoolError> {
+        // 记录失败
+        let _ = self.report(provider, failed_credential_id, false, 0);
+
+        tracing::warn!(
+            credential_id = %failed_credential_id,
+            provider = %provider,
+            "代理连接失败，执行故障转移"
+        );
+
+        // 尝试选择下一个凭证
+        self.select_with_client(provider)
     }
 
     /// 轮询选择凭证

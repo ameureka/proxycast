@@ -8,11 +8,112 @@ export interface ServerStatus {
   uptime_secs: number;
 }
 
+// TLS Configuration
+export interface TlsConfig {
+  enable: boolean;
+  cert_path: string | null;
+  key_path: string | null;
+}
+
+// Remote Management Configuration
+export interface RemoteManagementConfig {
+  allow_remote: boolean;
+  secret_key: string | null;
+  disable_control_panel: boolean;
+}
+
+// Quota Exceeded Configuration
+export interface QuotaExceededConfig {
+  switch_project: boolean;
+  switch_preview_model: boolean;
+  cooldown_seconds: number;
+}
+
+// Amp Model Mapping
+export interface AmpModelMapping {
+  from: string;
+  to: string;
+}
+
+// Amp CLI Configuration
+export interface AmpConfig {
+  upstream_url: string | null;
+  model_mappings: AmpModelMapping[];
+  restrict_management_to_localhost: boolean;
+}
+
+// Gemini API Key Entry
+export interface GeminiApiKeyEntry {
+  id: string;
+  api_key: string;
+  base_url: string | null;
+  proxy_url: string | null;
+  excluded_models: string[];
+  disabled: boolean;
+}
+
+// Vertex Model Alias
+export interface VertexModelAlias {
+  name: string;
+  alias: string;
+}
+
+// Vertex API Key Entry
+export interface VertexApiKeyEntry {
+  id: string;
+  api_key: string;
+  base_url: string | null;
+  models: VertexModelAlias[];
+  proxy_url: string | null;
+  disabled: boolean;
+}
+
+// iFlow Credential Entry
+export interface IFlowCredentialEntry {
+  id: string;
+  token_file: string | null;
+  auth_type: string;
+  cookies: string | null;
+  proxy_url: string | null;
+  disabled: boolean;
+}
+
+// Credential Entry (OAuth)
+export interface CredentialEntry {
+  id: string;
+  token_file: string;
+  disabled: boolean;
+  proxy_url: string | null;
+}
+
+// Credential Pool Configuration
+export interface CredentialPoolConfig {
+  kiro: CredentialEntry[];
+  gemini: CredentialEntry[];
+  qwen: CredentialEntry[];
+  openai: ApiKeyEntry[];
+  claude: ApiKeyEntry[];
+  gemini_api_keys: GeminiApiKeyEntry[];
+  vertex_api_keys: VertexApiKeyEntry[];
+  codex: CredentialEntry[];
+  iflow: IFlowCredentialEntry[];
+}
+
+// API Key Entry
+export interface ApiKeyEntry {
+  id: string;
+  api_key: string;
+  base_url: string | null;
+  disabled: boolean;
+  proxy_url: string | null;
+}
+
 export interface Config {
   server: {
     host: string;
     port: number;
     api_key: string;
+    tls: TlsConfig;
   };
   providers: {
     kiro: {
@@ -40,6 +141,11 @@ export interface Config {
     };
   };
   default_provider: string;
+  remote_management: RemoteManagementConfig;
+  quota_exceeded: QuotaExceededConfig;
+  ampcode: AmpConfig;
+  credential_pool: CredentialPoolConfig;
+  proxy_url: string | null;
 }
 
 export interface LogEntry {

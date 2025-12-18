@@ -1,4 +1,4 @@
-import { useState, forwardRef, useImperativeHandle } from "react";
+import { useState, useEffect, forwardRef, useImperativeHandle } from "react";
 import {
   RefreshCw,
   Plus,
@@ -6,6 +6,7 @@ import {
   HeartOff,
   RotateCcw,
   Activity,
+  Download,
 } from "lucide-react";
 import { useProviderPool } from "@/hooks/useProviderPool";
 import { CredentialCard } from "./CredentialCard";
@@ -14,6 +15,10 @@ import { EditCredentialModal } from "./EditCredentialModal";
 import { ErrorDisplay, useErrorDisplay } from "./ErrorDisplay";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HelpTip } from "@/components/HelpTip";
+import { getConfig, saveConfig, Config } from "@/hooks/useTauri";
+import { GeminiApiKeySection } from "./GeminiApiKeySection";
+import { VertexAISection } from "./VertexAISection";
+import { AmpConfigSection } from "./AmpConfigSection";
 import type {
   PoolProviderType,
   CredentialDisplay,
@@ -24,7 +29,7 @@ export interface ProviderPoolPageRef {
   refresh: () => void;
 }
 
-// All provider types
+// All provider types (OAuth/API Key 凭证)
 const allProviderTypes: PoolProviderType[] = [
   "kiro",
   "gemini",
@@ -32,7 +37,16 @@ const allProviderTypes: PoolProviderType[] = [
   "antigravity",
   "openai",
   "claude",
+  "codex",
+  "claude_oauth",
+  "iflow",
 ];
+
+// 配置类型 tab（非凭证池）
+type ConfigTabType = "gemini_api" | "vertex" | "amp";
+
+// 所有 tab 类型
+type TabType = PoolProviderType | ConfigTabType;
 
 const providerLabels: Record<PoolProviderType, string> = {
   kiro: "Kiro (AWS)",
@@ -41,6 +55,20 @@ const providerLabels: Record<PoolProviderType, string> = {
   antigravity: "Antigravity (Gemini 3 Pro)",
   openai: "OpenAI",
   claude: "Claude (Anthropic)",
+  codex: "Codex (OpenAI OAuth)",
+  claude_oauth: "Claude OAuth",
+  iflow: "iFlow",
+};
+
+const configTabLabels: Record<ConfigTabType, string> = {
+  gemini_api: "Gemini API Key",
+  vertex: "Vertex AI",
+  amp: "Amp CLI",
+};
+
+// 判断是否为配置类型 tab
+const isConfigTab = (tab: TabType): tab is ConfigTabType => {
+  return ["gemini_api", "vertex", "amp"].includes(tab);
 };
 
 export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
@@ -49,7 +77,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
     const [editModalOpen, setEditModalOpen] = useState(false);
     const [editingCredential, setEditingCredential] =
       useState<CredentialDisplay | null>(null);
-    const [activeTab, setActiveTab] = useState<PoolProviderType>("kiro");
+    const [activeTab, setActiveTab] = useState<TabType>("kiro");
     const [deletingCredentials, setDeletingCredentials] = useState<Set<string>>(
       new Set(),
     );
@@ -71,7 +99,49 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       checkTypeHealth,
       refreshCredentialToken,
       updateCredential,
+      migratePrivateConfig,
     } = useProviderPool();
+
+    const [migrating, setMigrating] = useState(false);
+
+    // 配置 tab 相关状态
+    const [config, setConfig] = useState<Config | null>(null);
+    const [configLoading, setConfigLoading] = useState(false);
+    const [configSaving, setConfigSaving] = useState(false);
+
+    // 加载配置
+    const loadConfig = async () => {
+      setConfigLoading(true);
+      try {
+        const c = await getConfig();
+        setConfig(c);
+      } catch (e) {
+        console.error("Failed to load config:", e);
+        showError("加载配置失败", "config");
+      }
+      setConfigLoading(false);
+    };
+
+    // 保存配置
+    const handleSaveConfig = async () => {
+      if (!config) return;
+      setConfigSaving(true);
+      try {
+        await saveConfig(config);
+        showSuccess("配置已保存");
+      } catch (e) {
+        showError(e instanceof Error ? e.message : String(e), "config");
+      }
+      setConfigSaving(false);
+    };
+
+    // 切换到配置 tab 时加载配置
+    useEffect(() => {
+      if (isConfigTab(activeTab)) {
+        loadConfig();
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
 
     useImperativeHandle(ref, () => ({
       refresh,
@@ -87,7 +157,12 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       setDeleteConfirm(null);
       setDeletingCredentials((prev) => new Set(prev).add(uuid));
       try {
-        await deleteCredential(uuid);
+        // Pass activeTab (provider_type) to enable YAML config sync
+        // 只有凭证池 tab 才传递 provider_type
+        const providerType = !isConfigTab(activeTab)
+          ? (activeTab as PoolProviderType)
+          : undefined;
+        await deleteCredential(uuid, providerType);
       } catch (e) {
         showError(e instanceof Error ? e.message : String(e), "delete", uuid);
       } finally {
@@ -152,6 +227,31 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       }
     };
 
+    // 迁移 Private 配置到凭证池
+    const handleMigratePrivateConfig = async () => {
+      setMigrating(true);
+      try {
+        const config = await getConfig();
+        const result = await migratePrivateConfig(config);
+        if (result.migrated_count > 0) {
+          showSuccess(
+            `成功迁移 ${result.migrated_count} 个凭证${result.skipped_count > 0 ? `，跳过 ${result.skipped_count} 个已存在的凭证` : ""}`,
+          );
+        } else if (result.skipped_count > 0) {
+          showSuccess(`所有凭证已存在，跳过 ${result.skipped_count} 个`);
+        } else {
+          showSuccess("没有需要迁移的凭证");
+        }
+        if (result.errors.length > 0) {
+          showError(`部分迁移失败: ${result.errors.join(", ")}`, "migrate");
+        }
+      } catch (e) {
+        showError(e instanceof Error ? e.message : String(e), "migrate");
+      } finally {
+        setMigrating(false);
+      }
+    };
+
     const handleRefreshToken = async (uuid: string) => {
       try {
         await refreshCredentialToken(uuid);
@@ -201,8 +301,10 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       return pool?.credentials?.length || 0;
     };
 
-    // Current tab data
-    const currentPool = getProviderOverview(activeTab);
+    // Current tab data (仅用于凭证池 tab)
+    const currentPool = !isConfigTab(activeTab)
+      ? getProviderOverview(activeTab as PoolProviderType)
+      : null;
     const currentStats = currentPool?.stats;
     const currentCredentials = currentPool?.credentials || [];
 
@@ -215,14 +317,29 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
               管理多个 AI 服务凭证，支持负载均衡和健康检测
             </p>
           </div>
-          <button
-            onClick={refresh}
-            disabled={loading}
-            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            刷新
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleMigratePrivateConfig}
+              disabled={migrating || loading}
+              className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+              title="从高级设置导入 Private 凭证"
+            >
+              <Download
+                className={`h-4 w-4 ${migrating ? "animate-pulse" : ""}`}
+              />
+              导入配置
+            </button>
+            <button
+              onClick={refresh}
+              disabled={loading}
+              className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
+              />
+              刷新
+            </button>
+          </div>
         </div>
 
         <HelpTip title="什么是凭证池？" variant="amber">
@@ -251,6 +368,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
 
         {/* Tabs */}
         <div className="flex gap-2 border-b overflow-x-auto">
+          {/* 凭证池 tabs */}
           {allProviderTypes.map((providerType) => {
             const count = getCredentialCount(providerType);
             return (
@@ -272,9 +390,105 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
               </button>
             );
           })}
+          {/* 分隔符 */}
+          <div className="border-l mx-2" />
+          {/* 配置 tabs */}
+          {(Object.keys(configTabLabels) as ConfigTabType[]).map((tabId) => (
+            <button
+              key={tabId}
+              onClick={() => setActiveTab(tabId)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap ${
+                activeTab === tabId
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {configTabLabels[tabId]}
+            </button>
+          ))}
         </div>
 
-        {loading ? (
+        {/* 配置 Tab 内容 */}
+        {isConfigTab(activeTab) ? (
+          configLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : config ? (
+            <div className="space-y-4">
+              {activeTab === "gemini_api" && (
+                <>
+                  <GeminiApiKeySection
+                    entries={config.credential_pool?.gemini_api_keys ?? []}
+                    onChange={(entries) =>
+                      setConfig({
+                        ...config,
+                        credential_pool: {
+                          ...config.credential_pool,
+                          gemini_api_keys: entries,
+                        },
+                      })
+                    }
+                  />
+                  <button
+                    onClick={handleSaveConfig}
+                    disabled={configSaving}
+                    className="w-full px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+                  >
+                    {configSaving ? "保存中..." : "保存配置"}
+                  </button>
+                </>
+              )}
+
+              {activeTab === "vertex" && (
+                <>
+                  <VertexAISection
+                    entries={config.credential_pool?.vertex_api_keys ?? []}
+                    onChange={(entries) =>
+                      setConfig({
+                        ...config,
+                        credential_pool: {
+                          ...config.credential_pool,
+                          vertex_api_keys: entries,
+                        },
+                      })
+                    }
+                  />
+                  <button
+                    onClick={handleSaveConfig}
+                    disabled={configSaving}
+                    className="w-full px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+                  >
+                    {configSaving ? "保存中..." : "保存配置"}
+                  </button>
+                </>
+              )}
+
+              {activeTab === "amp" && (
+                <AmpConfigSection
+                  config={
+                    config.ampcode ?? {
+                      upstream_url: null,
+                      model_mappings: [],
+                      restrict_management_to_localhost: false,
+                    }
+                  }
+                  onChange={(ampConfig) =>
+                    setConfig({
+                      ...config,
+                      ampcode: ampConfig,
+                    })
+                  }
+                  onSave={handleSaveConfig}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center py-12 text-muted-foreground">
+              加载配置失败
+            </div>
+          )
+        ) : loading ? (
           <div className="flex items-center justify-center py-12">
             <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
@@ -301,7 +515,9 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                 {currentCredentials.length > 0 && (
                   <>
                     <button
-                      onClick={() => handleCheckTypeHealth(activeTab)}
+                      onClick={() =>
+                        handleCheckTypeHealth(activeTab as PoolProviderType)
+                      }
                       disabled={checkingHealth === activeTab}
                       className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
                     >
@@ -311,7 +527,9 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                       检测全部
                     </button>
                     <button
-                      onClick={() => handleResetTypeHealth(activeTab)}
+                      onClick={() =>
+                        handleResetTypeHealth(activeTab as PoolProviderType)
+                      }
                       className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted"
                     >
                       <RotateCcw className="h-4 w-4" />
@@ -332,7 +550,9 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
             {/* Credentials List */}
             {currentCredentials.length === 0 ? (
               <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12 text-muted-foreground">
-                <p className="text-lg">暂无 {providerLabels[activeTab]} 凭证</p>
+                <p className="text-lg">
+                  暂无 {providerLabels[activeTab as PoolProviderType]} 凭证
+                </p>
                 <p className="mt-1 text-sm">点击上方"添加凭证"按钮添加</p>
                 <button
                   onClick={openAddModal}
@@ -344,30 +564,39 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
               </div>
             ) : (
               <div className="flex flex-col gap-4">
-                {currentCredentials.map((credential) => (
-                  <CredentialCard
-                    key={credential.uuid}
-                    credential={credential}
-                    onToggle={() => handleToggle(credential)}
-                    onDelete={() => handleDeleteClick(credential.uuid)}
-                    onReset={() => handleReset(credential.uuid)}
-                    onCheckHealth={() => handleCheckHealth(credential.uuid)}
-                    onRefreshToken={() => handleRefreshToken(credential.uuid)}
-                    onEdit={() => handleEdit(credential)}
-                    deleting={deletingCredentials.has(credential.uuid)}
-                    checkingHealth={checkingHealth === credential.uuid}
-                    refreshingToken={refreshingToken === credential.uuid}
-                  />
-                ))}
+                {currentCredentials.map((credential) => {
+                  // 判断是否为 OAuth 类型（需要刷新 Token 功能）
+                  const isOAuthType =
+                    credential.credential_type.includes("oauth");
+                  return (
+                    <CredentialCard
+                      key={credential.uuid}
+                      credential={credential}
+                      onToggle={() => handleToggle(credential)}
+                      onDelete={() => handleDeleteClick(credential.uuid)}
+                      onReset={() => handleReset(credential.uuid)}
+                      onCheckHealth={() => handleCheckHealth(credential.uuid)}
+                      onRefreshToken={
+                        isOAuthType
+                          ? () => handleRefreshToken(credential.uuid)
+                          : undefined
+                      }
+                      onEdit={() => handleEdit(credential)}
+                      deleting={deletingCredentials.has(credential.uuid)}
+                      checkingHealth={checkingHealth === credential.uuid}
+                      refreshingToken={refreshingToken === credential.uuid}
+                    />
+                  );
+                })}
               </div>
             )}
           </div>
         )}
 
-        {/* Add Credential Modal */}
-        {addModalOpen && (
+        {/* Add Credential Modal (仅凭证池 tab) */}
+        {addModalOpen && !isConfigTab(activeTab) && (
           <AddCredentialModal
-            providerType={activeTab}
+            providerType={activeTab as PoolProviderType}
             onClose={() => {
               setAddModalOpen(false);
             }}

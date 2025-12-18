@@ -137,8 +137,9 @@ impl ProviderPoolService {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Credential not found: {}", uuid))?;
 
+        // 处理 name：空字符串表示清除，None 表示不修改
         if let Some(n) = name {
-            cred.name = Some(n);
+            cred.name = if n.is_empty() { None } else { Some(n) };
         }
         if let Some(d) = is_disabled {
             cred.is_disabled = d;
@@ -146,8 +147,9 @@ impl ProviderPoolService {
         if let Some(c) = check_health {
             cred.check_health = c;
         }
+        // 处理 check_model_name：空字符串表示清除，None 表示不修改
         if let Some(m) = check_model_name {
-            cred.check_model_name = Some(m);
+            cred.check_model_name = if m.is_empty() { None } else { Some(m) };
         }
         if let Some(models) = not_supported_models {
             cred.not_supported_models = models;
@@ -406,6 +408,30 @@ impl ProviderPoolService {
                 self.check_claude_health(api_key, base_url.as_deref(), model)
                     .await
             }
+            CredentialData::VertexKey {
+                api_key, base_url, ..
+            } => {
+                self.check_vertex_health(api_key, base_url.as_deref(), model)
+                    .await
+            }
+            CredentialData::GeminiApiKey {
+                api_key, base_url, ..
+            } => {
+                self.check_gemini_api_key_health(api_key, base_url.as_deref(), model)
+                    .await
+            }
+            CredentialData::CodexOAuth { creds_file_path } => {
+                self.check_codex_health(creds_file_path, model).await
+            }
+            CredentialData::ClaudeOAuth { creds_file_path } => {
+                self.check_claude_oauth_health(creds_file_path, model).await
+            }
+            CredentialData::IFlowOAuth { creds_file_path } => {
+                self.check_iflow_oauth_health(creds_file_path, model).await
+            }
+            CredentialData::IFlowCookie { creds_file_path } => {
+                self.check_iflow_cookie_health(creds_file_path, model).await
+            }
         }
     }
 
@@ -643,22 +669,32 @@ impl ProviderPoolService {
     }
 
     // OpenAI API 健康检查
+    // 与 OpenAI Provider 保持一致的 URL 处理逻辑
     async fn check_openai_health(
         &self,
         api_key: &str,
         base_url: Option<&str>,
         model: &str,
     ) -> Result<(), String> {
-        let url = format!(
-            "{}/chat/completions",
-            base_url.unwrap_or("https://api.openai.com/v1")
-        );
+        // base_url 应该不带 /v1，在这里拼接
+        // 但为了兼容用户可能输入带 /v1 的情况，这里做智能处理
+        let base = base_url.unwrap_or("https://api.openai.com");
+        let base = base.trim_end_matches('/');
+
+        // 如果用户输入了带 /v1 的 URL，直接使用；否则拼接 /v1
+        let url = if base.ends_with("/v1") {
+            format!("{}/chat/completions", base)
+        } else {
+            format!("{}/v1/chat/completions", base)
+        };
 
         let request_body = serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "Say OK"}],
             "max_tokens": 10
         });
+
+        tracing::debug!("[HEALTH_CHECK] OpenAI API URL: {}, model: {}", url, model);
 
         let response = self
             .client
@@ -673,22 +709,150 @@ impl ProviderPoolService {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(format!("HTTP {}", response.status()))
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!(
+                "HTTP {} - {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            ))
         }
     }
 
     // Claude API 健康检查
+    // 与 ClaudeCustomProvider 保持一致的 URL 处理逻辑
     async fn check_claude_health(
         &self,
         api_key: &str,
         base_url: Option<&str>,
         model: &str,
     ) -> Result<(), String> {
-        let url = format!(
-            "{}/messages",
-            base_url.unwrap_or("https://api.anthropic.com/v1")
-        );
+        // 与 ClaudeCustomProvider::get_base_url() 保持一致
+        // base_url 应该不带 /v1，在这里拼接
+        // 但为了兼容用户可能输入带 /v1 的情况，这里做智能处理
+        let base = base_url.unwrap_or("https://api.anthropic.com");
+        let base = base.trim_end_matches('/');
 
+        // 如果用户输入了带 /v1 的 URL，直接使用；否则拼接 /v1
+        let url = if base.ends_with("/v1") {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/v1/messages", base)
+        };
+
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 10
+        });
+
+        tracing::debug!("[HEALTH_CHECK] Claude API URL: {}, model: {}", url, model);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!(
+                "HTTP {} - {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            ))
+        }
+    }
+
+    // Vertex AI 健康检查
+    async fn check_vertex_health(
+        &self,
+        api_key: &str,
+        base_url: Option<&str>,
+        model: &str,
+    ) -> Result<(), String> {
+        let base = base_url.unwrap_or("https://generativelanguage.googleapis.com/v1beta");
+        let url = format!("{}/models/{}:generateContent", base, model);
+
+        let request_body = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "Say OK"}]}],
+            "generationConfig": {"maxOutputTokens": 10}
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {}", response.status()))
+        }
+    }
+
+    // Gemini API Key 健康检查
+    async fn check_gemini_api_key_health(
+        &self,
+        api_key: &str,
+        base_url: Option<&str>,
+        model: &str,
+    ) -> Result<(), String> {
+        let base = base_url.unwrap_or("https://generativelanguage.googleapis.com");
+        let url = format!("{}/v1beta/models/{}:generateContent", base, model);
+
+        let request_body = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "Say OK"}]}],
+            "generationConfig": {"maxOutputTokens": 10}
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {}", response.status()))
+        }
+    }
+
+    // Codex 健康检查
+    async fn check_codex_health(&self, creds_path: &str, model: &str) -> Result<(), String> {
+        use crate::providers::codex::CodexProvider;
+
+        let mut provider = CodexProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 Codex 凭证失败: {}", e))?;
+
+        let token = provider
+            .ensure_valid_token()
+            .await
+            .map_err(|e| format!("获取 Codex Token 失败: {}", e))?;
+
+        // 使用 OpenAI 兼容 API 进行健康检查
+        let url = "https://api.openai.com/v1/chat/completions";
         let request_body = serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "Say OK"}],
@@ -697,9 +861,130 @@ impl ProviderPoolService {
 
         let response = self
             .client
-            .post(&url)
-            .header("x-api-key", api_key)
+            .post(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {}", response.status()))
+        }
+    }
+
+    // Claude OAuth 健康检查
+    async fn check_claude_oauth_health(&self, creds_path: &str, model: &str) -> Result<(), String> {
+        use crate::providers::claude_oauth::ClaudeOAuthProvider;
+
+        let mut provider = ClaudeOAuthProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 Claude OAuth 凭证失败: {}", e))?;
+
+        let token = provider
+            .ensure_valid_token()
+            .await
+            .map_err(|e| format!("获取 Claude OAuth Token 失败: {}", e))?;
+
+        // 使用 Anthropic API 进行健康检查
+        let url = "https://api.anthropic.com/v1/messages";
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 10
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", token))
             .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {}", response.status()))
+        }
+    }
+
+    // iFlow OAuth 健康检查
+    async fn check_iflow_oauth_health(&self, creds_path: &str, model: &str) -> Result<(), String> {
+        use crate::providers::iflow::IFlowProvider;
+
+        let mut provider = IFlowProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 iFlow OAuth 凭证失败: {}", e))?;
+
+        let token = provider
+            .ensure_valid_token()
+            .await
+            .map_err(|e| format!("获取 iFlow OAuth Token 失败: {}", e))?;
+
+        // 使用 iFlow API 进行健康检查
+        let url = "https://iflow.cn/api/v1/chat/completions";
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 10
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&request_body)
+            .timeout(self.health_check_timeout)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {}", response.status()))
+        }
+    }
+
+    // iFlow Cookie 健康检查
+    async fn check_iflow_cookie_health(&self, creds_path: &str, model: &str) -> Result<(), String> {
+        use crate::providers::iflow::IFlowProvider;
+
+        let mut provider = IFlowProvider::new();
+        provider
+            .load_credentials_from_path(creds_path)
+            .await
+            .map_err(|e| format!("加载 iFlow Cookie 凭证失败: {}", e))?;
+
+        let api_key = provider
+            .credentials
+            .api_key
+            .as_ref()
+            .ok_or_else(|| "iFlow Cookie 凭证中没有 API Key".to_string())?;
+
+        // 使用 iFlow API 进行健康检查
+        let url = "https://iflow.cn/api/v1/chat/completions";
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 10
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
             .json(&request_body)
             .timeout(self.health_check_timeout)
             .send()
@@ -842,6 +1127,9 @@ impl ProviderPoolService {
     }
 
     /// 刷新 OAuth Token (Kiro)
+    ///
+    /// 使用副本文件中的凭证进行刷新，副本文件应包含完整的 client_id/client_secret。
+    /// 支持多账号场景，每个副本文件完全独立。
     pub async fn refresh_kiro_token(&self, creds_path: &str) -> Result<String, String> {
         let mut provider = crate::providers::kiro::KiroProvider::new();
         provider
@@ -850,6 +1138,8 @@ impl ProviderPoolService {
             .map_err(|e| {
                 self.format_user_friendly_error(&format!("加载凭证失败: {}", e), "Kiro")
             })?;
+
+        // 使用副本文件中的凭证刷新 Token
         provider.refresh_token().await.map_err(|e| {
             self.format_user_friendly_error(&format!("刷新 Token 失败: {}", e), "Kiro")
         })
@@ -942,4 +1232,229 @@ impl ProviderPoolService {
 
         self.get_oauth_status(&creds_path, &cred.provider_type.to_string())
     }
+
+    /// 添加带来源的凭证
+    pub fn add_credential_with_source(
+        &self,
+        db: &DbConnection,
+        provider_type: &str,
+        credential: CredentialData,
+        name: Option<String>,
+        check_health: Option<bool>,
+        check_model_name: Option<String>,
+        source: crate::models::provider_pool_model::CredentialSource,
+    ) -> Result<ProviderCredential, String> {
+        let pt: PoolProviderType = provider_type.parse().map_err(|e: String| e)?;
+
+        let mut cred = ProviderCredential::new_with_source(pt, credential, source);
+        cred.name = name;
+        cred.check_health = check_health.unwrap_or(true);
+        cred.check_model_name = check_model_name;
+
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        ProviderPoolDao::insert(&conn, &cred).map_err(|e| e.to_string())?;
+
+        Ok(cred)
+    }
+
+    /// 迁移 Private 配置到凭证池
+    ///
+    /// 从 providers 配置中读取单个凭证配置，迁移到凭证池中并标记为 Private 来源
+    pub fn migrate_private_config(
+        &self,
+        db: &DbConnection,
+        config: &crate::config::Config,
+    ) -> Result<MigrationResult, String> {
+        use crate::config::expand_tilde;
+        use crate::models::provider_pool_model::CredentialSource;
+
+        let mut result = MigrationResult::default();
+
+        // 迁移 Kiro 凭证
+        if config.providers.kiro.enabled {
+            if let Some(creds_path) = &config.providers.kiro.credentials_path {
+                let expanded_path = expand_tilde(creds_path);
+                let expanded_path_str = expanded_path.to_string_lossy().to_string();
+                if expanded_path.exists() {
+                    // 检查是否已存在相同路径的凭证
+                    if !self.credential_exists_by_path(db, &expanded_path_str)? {
+                        match self.add_credential_with_source(
+                            db,
+                            "kiro",
+                            CredentialData::KiroOAuth {
+                                creds_file_path: expanded_path_str.clone(),
+                            },
+                            Some("Private Kiro".to_string()),
+                            Some(true),
+                            None,
+                            CredentialSource::Private,
+                        ) {
+                            Ok(_) => result.migrated_count += 1,
+                            Err(e) => result.errors.push(format!("Kiro: {}", e)),
+                        }
+                    } else {
+                        result.skipped_count += 1;
+                    }
+                }
+            }
+        }
+
+        // 迁移 Gemini 凭证
+        if config.providers.gemini.enabled {
+            if let Some(creds_path) = &config.providers.gemini.credentials_path {
+                let expanded_path = expand_tilde(creds_path);
+                let expanded_path_str = expanded_path.to_string_lossy().to_string();
+                if expanded_path.exists() {
+                    if !self.credential_exists_by_path(db, &expanded_path_str)? {
+                        match self.add_credential_with_source(
+                            db,
+                            "gemini",
+                            CredentialData::GeminiOAuth {
+                                creds_file_path: expanded_path_str.clone(),
+                                project_id: config.providers.gemini.project_id.clone(),
+                            },
+                            Some("Private Gemini".to_string()),
+                            Some(true),
+                            None,
+                            CredentialSource::Private,
+                        ) {
+                            Ok(_) => result.migrated_count += 1,
+                            Err(e) => result.errors.push(format!("Gemini: {}", e)),
+                        }
+                    } else {
+                        result.skipped_count += 1;
+                    }
+                }
+            }
+        }
+
+        // 迁移 Qwen 凭证
+        if config.providers.qwen.enabled {
+            if let Some(creds_path) = &config.providers.qwen.credentials_path {
+                let expanded_path = expand_tilde(creds_path);
+                let expanded_path_str = expanded_path.to_string_lossy().to_string();
+                if expanded_path.exists() {
+                    if !self.credential_exists_by_path(db, &expanded_path_str)? {
+                        match self.add_credential_with_source(
+                            db,
+                            "qwen",
+                            CredentialData::QwenOAuth {
+                                creds_file_path: expanded_path_str.clone(),
+                            },
+                            Some("Private Qwen".to_string()),
+                            Some(true),
+                            None,
+                            CredentialSource::Private,
+                        ) {
+                            Ok(_) => result.migrated_count += 1,
+                            Err(e) => result.errors.push(format!("Qwen: {}", e)),
+                        }
+                    } else {
+                        result.skipped_count += 1;
+                    }
+                }
+            }
+        }
+
+        // 迁移 OpenAI 凭证
+        if config.providers.openai.enabled {
+            if let Some(api_key) = &config.providers.openai.api_key {
+                if !self.credential_exists_by_api_key(db, api_key)? {
+                    match self.add_credential_with_source(
+                        db,
+                        "openai",
+                        CredentialData::OpenAIKey {
+                            api_key: api_key.clone(),
+                            base_url: config.providers.openai.base_url.clone(),
+                        },
+                        Some("Private OpenAI".to_string()),
+                        Some(true),
+                        None,
+                        CredentialSource::Private,
+                    ) {
+                        Ok(_) => result.migrated_count += 1,
+                        Err(e) => result.errors.push(format!("OpenAI: {}", e)),
+                    }
+                } else {
+                    result.skipped_count += 1;
+                }
+            }
+        }
+
+        // 迁移 Claude 凭证
+        if config.providers.claude.enabled {
+            if let Some(api_key) = &config.providers.claude.api_key {
+                if !self.credential_exists_by_api_key(db, api_key)? {
+                    match self.add_credential_with_source(
+                        db,
+                        "claude",
+                        CredentialData::ClaudeKey {
+                            api_key: api_key.clone(),
+                            base_url: config.providers.claude.base_url.clone(),
+                        },
+                        Some("Private Claude".to_string()),
+                        Some(true),
+                        None,
+                        CredentialSource::Private,
+                    ) {
+                        Ok(_) => result.migrated_count += 1,
+                        Err(e) => result.errors.push(format!("Claude: {}", e)),
+                    }
+                } else {
+                    result.skipped_count += 1;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// 检查是否存在相同路径的凭证
+    fn credential_exists_by_path(&self, db: &DbConnection, path: &str) -> Result<bool, String> {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let all_creds = ProviderPoolDao::get_all(&conn).map_err(|e| e.to_string())?;
+
+        for cred in all_creds {
+            if let Some(cred_path) = get_oauth_creds_path(&cred.credential) {
+                if cred_path == path {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// 检查是否存在相同 API Key 的凭证
+    fn credential_exists_by_api_key(
+        &self,
+        db: &DbConnection,
+        api_key: &str,
+    ) -> Result<bool, String> {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let all_creds = ProviderPoolDao::get_all(&conn).map_err(|e| e.to_string())?;
+
+        for cred in all_creds {
+            match &cred.credential {
+                CredentialData::OpenAIKey { api_key: key, .. }
+                | CredentialData::ClaudeKey { api_key: key, .. } => {
+                    if key == api_key {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// 迁移结果
+#[derive(Debug, Clone, Default)]
+pub struct MigrationResult {
+    /// 成功迁移的凭证数量
+    pub migrated_count: usize,
+    /// 跳过的凭证数量（已存在）
+    pub skipped_count: usize,
+    /// 错误信息列表
+    pub errors: Vec<String>,
 }

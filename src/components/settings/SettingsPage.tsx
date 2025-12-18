@@ -4,12 +4,16 @@ import { GeneralSettings } from "./GeneralSettings";
 import { ProxySettings } from "./ProxySettings";
 import { DirectorySettings } from "./DirectorySettings";
 import { AboutSection } from "./AboutSection";
+import { TlsSettings } from "./TlsSettings";
+import { QuotaSettings } from "./QuotaSettings";
+import { RemoteManagementSettings } from "./RemoteManagementSettings";
 
-type SettingsTab = "general" | "proxy" | "advanced" | "about";
+type SettingsTab = "general" | "proxy" | "security" | "advanced" | "about";
 
 const tabs: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "通用" },
   { id: "proxy", label: "代理服务" },
+  { id: "security", label: "安全" },
   { id: "advanced", label: "高级" },
   { id: "about", label: "关于" },
 ];
@@ -49,7 +53,18 @@ export function SettingsPage() {
       <div className="flex-1 overflow-auto">
         {activeTab === "general" && <GeneralSettings />}
         {activeTab === "proxy" && <ProxySettings />}
-        {activeTab === "advanced" && <DirectorySettings />}
+        {activeTab === "security" && (
+          <div className="space-y-6 max-w-2xl">
+            <TlsSettings />
+            <RemoteManagementSettings />
+          </div>
+        )}
+        {activeTab === "advanced" && (
+          <div className="space-y-6 max-w-2xl">
+            <DirectorySettings />
+            <QuotaSettings />
+          </div>
+        )}
         {activeTab === "about" && <AboutSection />}
       </div>
     </div>

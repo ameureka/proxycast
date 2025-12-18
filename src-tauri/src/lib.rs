@@ -5,10 +5,14 @@ pub mod credential;
 mod database;
 pub mod injection;
 mod logger;
+pub mod middleware;
 mod models;
+pub mod plugin;
+pub mod processor;
 mod providers;
+pub mod proxy;
 pub mod resilience;
-mod router;
+pub mod router;
 mod server;
 mod services;
 pub mod telemetry;
@@ -18,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use commands::provider_pool_cmd::ProviderPoolServiceState;
+use commands::provider_pool_cmd::{CredentialSyncServiceState, ProviderPoolServiceState};
 use commands::resilience_cmd::ResilienceConfigState;
 use commands::router_cmd::RouterConfigState;
 use commands::skill_cmd::SkillServiceState;
@@ -39,6 +43,10 @@ pub enum ProviderType {
     OpenAI,
     Claude,
     Antigravity,
+    Vertex,
+    /// Gemini API Key (multi-account load balancing)
+    #[serde(rename = "gemini_api_key")]
+    GeminiApiKey,
 }
 
 impl std::fmt::Display for ProviderType {
@@ -50,6 +58,8 @@ impl std::fmt::Display for ProviderType {
             ProviderType::OpenAI => write!(f, "openai"),
             ProviderType::Claude => write!(f, "claude"),
             ProviderType::Antigravity => write!(f, "antigravity"),
+            ProviderType::Vertex => write!(f, "vertex"),
+            ProviderType::GeminiApiKey => write!(f, "gemini_api_key"),
         }
     }
 }
@@ -65,6 +75,8 @@ impl std::str::FromStr for ProviderType {
             "openai" => Ok(ProviderType::OpenAI),
             "claude" => Ok(ProviderType::Claude),
             "antigravity" => Ok(ProviderType::Antigravity),
+            "vertex" => Ok(ProviderType::Vertex),
+            "gemini_api_key" => Ok(ProviderType::GeminiApiKey),
             _ => Err(format!("Invalid provider: {s}")),
         }
     }
@@ -90,12 +102,24 @@ mod tests {
             "claude".parse::<ProviderType>().unwrap(),
             ProviderType::Claude
         );
+        assert_eq!(
+            "vertex".parse::<ProviderType>().unwrap(),
+            ProviderType::Vertex
+        );
+        assert_eq!(
+            "gemini_api_key".parse::<ProviderType>().unwrap(),
+            ProviderType::GeminiApiKey
+        );
 
         // 测试大小写不敏感
         assert_eq!("KIRO".parse::<ProviderType>().unwrap(), ProviderType::Kiro);
         assert_eq!(
             "Gemini".parse::<ProviderType>().unwrap(),
             ProviderType::Gemini
+        );
+        assert_eq!(
+            "VERTEX".parse::<ProviderType>().unwrap(),
+            ProviderType::Vertex
         );
 
         // 测试无效的 provider
@@ -109,6 +133,8 @@ mod tests {
         assert_eq!(ProviderType::Qwen.to_string(), "qwen");
         assert_eq!(ProviderType::OpenAI.to_string(), "openai");
         assert_eq!(ProviderType::Claude.to_string(), "claude");
+        assert_eq!(ProviderType::Vertex.to_string(), "vertex");
+        assert_eq!(ProviderType::GeminiApiKey.to_string(), "gemini_api_key");
     }
 
     #[test]
@@ -966,6 +992,14 @@ async fn check_api_compatibility(
             ("gemini-3-pro-preview", "basic"),
             ("gemini-3-pro-preview", "tool_call"),
         ],
+        ProviderType::Vertex => vec![
+            ("gemini-2.0-flash", "basic"),
+            ("gemini-2.0-flash", "tool_call"),
+        ],
+        ProviderType::GeminiApiKey => vec![
+            ("gemini-2.5-flash", "basic"),
+            ("gemini-2.5-flash", "tool_call"),
+        ],
         ProviderType::OpenAI | ProviderType::Claude => vec![],
     };
 
@@ -1236,7 +1270,12 @@ async fn test_api(
 ) -> Result<TestResult, String> {
     let s = state.read().await;
     let base_url = format!("http://{}:{}", s.config.server.host, s.config.server.port);
-    let api_key = &s.config.server.api_key;
+    // 优先使用服务器运行时的 API key，确保测试使用的 key 和服务器一致
+    // 如果服务器未运行，则使用配置中的 key
+    let api_key = s
+        .running_api_key
+        .as_ref()
+        .unwrap_or(&s.config.server.api_key);
 
     // 创建一个禁用代理的客户端
     let client = reqwest::Client::builder()
@@ -1309,6 +1348,11 @@ pub fn run() {
     let provider_pool_service = ProviderPoolService::new();
     let provider_pool_service_state = ProviderPoolServiceState(Arc::new(provider_pool_service));
 
+    // Initialize CredentialSyncService (optional - only if config manager is available)
+    // For now, we initialize it as None since ConfigManager requires async setup
+    // This can be enhanced later to properly initialize with ConfigManager
+    let credential_sync_service_state = CredentialSyncServiceState(None);
+
     // Initialize TokenCacheService
     let token_cache_service = TokenCacheService::new();
     let token_cache_service_state = TokenCacheServiceState(Arc::new(token_cache_service));
@@ -1319,8 +1363,25 @@ pub fn run() {
     // Initialize ResilienceConfigState
     let resilience_config_state = ResilienceConfigState::default();
 
-    // Initialize TelemetryState
-    let telemetry_state = commands::telemetry_cmd::TelemetryState::default();
+    // Initialize shared telemetry instances for both TelemetryState and RequestProcessor
+    // This allows the frontend monitoring page to display data recorded by the request processor
+    let shared_stats = Arc::new(parking_lot::RwLock::new(
+        telemetry::StatsAggregator::with_defaults(),
+    ));
+    let shared_tokens = Arc::new(parking_lot::RwLock::new(
+        telemetry::TokenTracker::with_defaults(),
+    ));
+    let shared_logger = Arc::new(
+        telemetry::RequestLogger::with_defaults().expect("Failed to create RequestLogger"),
+    );
+
+    // Initialize TelemetryState with shared instances
+    let telemetry_state = commands::telemetry_cmd::TelemetryState::with_shared(
+        shared_stats.clone(),
+        shared_tokens.clone(),
+        Some(shared_logger.clone()),
+    )
+    .expect("Failed to create TelemetryState");
 
     // Initialize default skill repos
     {
@@ -1335,6 +1396,9 @@ pub fn run() {
     let db_clone = db.clone();
     let pool_service_clone = provider_pool_service_state.0.clone();
     let token_cache_clone = token_cache_service_state.0.clone();
+    let shared_stats_clone = shared_stats.clone();
+    let shared_tokens_clone = shared_tokens.clone();
+    let shared_logger_clone = shared_logger.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1348,6 +1412,7 @@ pub fn run() {
         .manage(db)
         .manage(skill_service_state)
         .manage(provider_pool_service_state)
+        .manage(credential_sync_service_state)
         .manage(token_cache_service_state)
         .manage(router_config_state)
         .manage(resilience_config_state)
@@ -1359,6 +1424,9 @@ pub fn run() {
             let db = db_clone.clone();
             let pool_service = pool_service_clone.clone();
             let token_cache = token_cache_clone.clone();
+            let shared_stats = shared_stats_clone.clone();
+            let shared_tokens = shared_tokens_clone.clone();
+            let shared_logger = shared_logger_clone.clone();
             tauri::async_runtime::spawn(async move {
                 // 先加载凭证
                 {
@@ -1371,14 +1439,22 @@ pub fn run() {
                         logs.write().await.add("info", "[启动] Kiro 凭证已加载");
                     }
                 }
-                // 启动服务器
+                // 启动服务器（使用共享的遥测实例）
                 {
                     let mut s = state.write().await;
                     logs.write()
                         .await
                         .add("info", "[启动] 正在自动启动服务器...");
                     match s
-                        .start(logs.clone(), pool_service, token_cache, Some(db))
+                        .start_with_telemetry(
+                            logs.clone(),
+                            pool_service,
+                            token_cache,
+                            Some(db),
+                            Some(shared_stats),
+                            Some(shared_tokens),
+                            Some(shared_logger),
+                        )
                         .await
                     {
                         Ok(_) => {
@@ -1469,6 +1545,14 @@ pub fn run() {
             commands::config_cmd::validate_config_yaml,
             commands::config_cmd::import_config,
             commands::config_cmd::get_config_paths,
+            // Enhanced export/import commands (using ExportService/ImportService)
+            commands::config_cmd::export_bundle,
+            commands::config_cmd::export_config_yaml,
+            commands::config_cmd::validate_import,
+            commands::config_cmd::import_bundle,
+            // Path utility commands
+            commands::config_cmd::expand_path,
+            commands::config_cmd::open_auth_dir,
             // MCP commands
             commands::mcp_cmd::get_mcp_servers,
             commands::mcp_cmd::add_mcp_server,
@@ -1519,6 +1603,7 @@ pub fn run() {
             commands::provider_pool_cmd::get_pool_credential_oauth_status,
             commands::provider_pool_cmd::debug_kiro_credentials,
             commands::provider_pool_cmd::test_user_credentials,
+            commands::provider_pool_cmd::migrate_private_config_to_pool,
             // Route commands
             commands::route_cmd::get_available_routes,
             commands::route_cmd::get_route_curl_examples,
@@ -1534,6 +1619,9 @@ pub fn run() {
             commands::router_cmd::add_exclusion,
             commands::router_cmd::remove_exclusion,
             commands::router_cmd::set_router_default_provider,
+            commands::router_cmd::get_recommended_presets,
+            commands::router_cmd::apply_recommended_preset,
+            commands::router_cmd::clear_all_routing_config,
             // Resilience config commands
             commands::resilience_cmd::get_retry_config,
             commands::resilience_cmd::update_retry_config,

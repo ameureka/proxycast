@@ -664,3 +664,1266 @@ proptest! {
         );
     }
 }
+
+// ============ 凭证同步服务属性测试 ============
+
+use crate::config::{Config, ConfigManager};
+use crate::credential::CredentialSyncService;
+use crate::models::provider_pool_model::{
+    CredentialData as PoolCredentialData, PoolProviderType, ProviderCredential,
+};
+use std::sync::RwLock;
+use tempfile::TempDir;
+
+/// 创建临时测试环境
+fn create_test_env() -> (TempDir, Arc<RwLock<ConfigManager>>) {
+    let temp_dir = TempDir::new().expect("创建临时目录失败");
+    let config_path = temp_dir.path().join("config.yaml");
+
+    // 创建配置管理器
+    let mut config = Config::default();
+    config.auth_dir = temp_dir.path().join("auth").to_string_lossy().to_string();
+
+    let mut manager = ConfigManager::new(config_path);
+    manager.set_config(config);
+    manager.save().expect("保存配置失败");
+
+    (temp_dir, Arc::new(RwLock::new(manager)))
+}
+
+/// 生成随机的 PoolProviderType（仅支持同步的类型）
+fn arb_sync_provider_type() -> impl Strategy<Value = PoolProviderType> {
+    prop_oneof![
+        Just(PoolProviderType::Kiro),
+        Just(PoolProviderType::Gemini),
+        Just(PoolProviderType::Qwen),
+        Just(PoolProviderType::OpenAI),
+        Just(PoolProviderType::Claude),
+    ]
+}
+
+/// 生成随机的 API Key 凭证数据
+fn arb_api_key_credential() -> impl Strategy<Value = (PoolProviderType, PoolCredentialData)> {
+    prop_oneof![
+        (
+            "[a-zA-Z0-9]{20,50}",
+            prop::option::of("https://[a-z]+\\.[a-z]+/v1")
+        )
+            .prop_map(|(api_key, base_url)| {
+                (
+                    PoolProviderType::OpenAI,
+                    PoolCredentialData::OpenAIKey { api_key, base_url },
+                )
+            }),
+        (
+            "[a-zA-Z0-9]{20,50}",
+            prop::option::of("https://[a-z]+\\.[a-z]+")
+        )
+            .prop_map(|(api_key, base_url)| {
+                (
+                    PoolProviderType::Claude,
+                    PoolCredentialData::ClaudeKey { api_key, base_url },
+                )
+            }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: config-credential-export, Property 1: Credential Sync Round Trip**
+    /// *For any* credential added to the credential pool, saving to YAML and then loading
+    /// from YAML should produce an equivalent credential configuration.
+    /// **Validates: Requirements 1.1, 1.2, 1.5**
+    #[test]
+    fn prop_credential_sync_round_trip(
+        (provider_type, cred_data) in arb_api_key_credential(),
+        is_disabled in proptest::bool::ANY
+    ) {
+        let (_temp_dir, config_manager) = create_test_env();
+        let sync_service = CredentialSyncService::new(config_manager.clone());
+
+        // 创建凭证
+        let mut credential = ProviderCredential::new(provider_type, cred_data.clone());
+        credential.is_disabled = is_disabled;
+        let original_uuid = credential.uuid.clone();
+
+        // 添加凭证
+        let add_result = sync_service.add_credential(&credential);
+        prop_assert!(add_result.is_ok(), "添加凭证应该成功: {:?}", add_result);
+
+        // 从配置加载凭证
+        let loaded = sync_service.load_from_config();
+        prop_assert!(loaded.is_ok(), "加载凭证应该成功: {:?}", loaded);
+
+        let loaded_creds = loaded.unwrap();
+
+        // 查找对应的凭证
+        let found = loaded_creds.iter().find(|c| c.uuid == original_uuid);
+        prop_assert!(found.is_some(), "应该能找到添加的凭证");
+
+        let loaded_cred = found.unwrap();
+
+        // 验证凭证属性
+        prop_assert_eq!(
+            &loaded_cred.uuid,
+            &original_uuid,
+            "UUID 应该一致"
+        );
+        prop_assert_eq!(
+            loaded_cred.provider_type,
+            provider_type,
+            "Provider 类型应该一致"
+        );
+        prop_assert_eq!(
+            loaded_cred.is_disabled,
+            is_disabled,
+            "禁用状态应该一致"
+        );
+
+        // 验证凭证数据
+        match (&loaded_cred.credential, &cred_data) {
+            (
+                PoolCredentialData::OpenAIKey { api_key: loaded_key, base_url: loaded_url },
+                PoolCredentialData::OpenAIKey { api_key: orig_key, base_url: orig_url },
+            ) => {
+                prop_assert_eq!(loaded_key, orig_key, "API Key 应该一致");
+                prop_assert_eq!(loaded_url, orig_url, "Base URL 应该一致");
+            }
+            (
+                PoolCredentialData::ClaudeKey { api_key: loaded_key, base_url: loaded_url },
+                PoolCredentialData::ClaudeKey { api_key: orig_key, base_url: orig_url },
+            ) => {
+                prop_assert_eq!(loaded_key, orig_key, "API Key 应该一致");
+                prop_assert_eq!(loaded_url, orig_url, "Base URL 应该一致");
+            }
+            _ => {
+                prop_assert!(false, "凭证类型不匹配");
+            }
+        }
+    }
+
+    /// **Feature: config-credential-export, Property 1: Credential Sync Round Trip (Multiple)**
+    /// *For any* set of credentials, adding them all and then loading should preserve all.
+    /// **Validates: Requirements 1.1, 1.2, 1.5**
+    #[test]
+    fn prop_credential_sync_round_trip_multiple(
+        cred_count in 1usize..=5usize
+    ) {
+        let (_temp_dir, config_manager) = create_test_env();
+        let sync_service = CredentialSyncService::new(config_manager.clone());
+
+        // 创建多个凭证
+        let mut original_uuids = Vec::new();
+        for i in 0..cred_count {
+            let cred_data = if i % 2 == 0 {
+                PoolCredentialData::OpenAIKey {
+                    api_key: format!("sk-test-key-{}", i),
+                    base_url: Some("https://api.openai.com/v1".to_string()),
+                }
+            } else {
+                PoolCredentialData::ClaudeKey {
+                    api_key: format!("sk-ant-test-key-{}", i),
+                    base_url: None,
+                }
+            };
+
+            let provider_type = if i % 2 == 0 {
+                PoolProviderType::OpenAI
+            } else {
+                PoolProviderType::Claude
+            };
+
+            let credential = ProviderCredential::new(provider_type, cred_data);
+            original_uuids.push(credential.uuid.clone());
+
+            let add_result = sync_service.add_credential(&credential);
+            prop_assert!(add_result.is_ok(), "添加凭证 {} 应该成功", i);
+        }
+
+        // 从配置加载凭证
+        let loaded = sync_service.load_from_config().unwrap();
+
+        // 验证所有凭证都被加载
+        prop_assert_eq!(
+            loaded.len(),
+            cred_count,
+            "加载的凭证数量应该与添加的一致"
+        );
+
+        // 验证每个 UUID 都存在
+        for uuid in &original_uuids {
+            let found = loaded.iter().any(|c| &c.uuid == uuid);
+            prop_assert!(found, "应该能找到 UUID 为 {} 的凭证", uuid);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: config-credential-export, Property 9: OAuth Token File Handling**
+    /// *For any* OAuth credential, the token file should be stored in auth-dir on add,
+    /// included in export bundles, and restored to auth-dir on import.
+    /// **Validates: Requirements 2.1, 2.4, 3.3, 4.4**
+    #[test]
+    fn prop_oauth_token_file_handling(
+        token_content in "[a-zA-Z0-9]{50,200}",
+        provider_idx in 0usize..3usize
+    ) {
+        let (temp_dir, config_manager) = create_test_env();
+        let sync_service = CredentialSyncService::new(config_manager.clone());
+
+        // 创建源 token 文件
+        let source_token_dir = temp_dir.path().join("source_tokens");
+        std::fs::create_dir_all(&source_token_dir).expect("创建源目录失败");
+
+        let source_token_path = source_token_dir.join("token.json");
+        let token_json = format!(r#"{{"access_token": "{}", "refresh_token": "refresh-{}", "expires_at": "2025-12-31T23:59:59Z"}}"#, token_content, token_content);
+        std::fs::write(&source_token_path, &token_json).expect("写入源 token 文件失败");
+
+        // 根据索引选择 provider 类型
+        let (provider_type, cred_data) = match provider_idx {
+            0 => (
+                PoolProviderType::Kiro,
+                PoolCredentialData::KiroOAuth {
+                    creds_file_path: source_token_path.to_string_lossy().to_string(),
+                },
+            ),
+            1 => (
+                PoolProviderType::Gemini,
+                PoolCredentialData::GeminiOAuth {
+                    creds_file_path: source_token_path.to_string_lossy().to_string(),
+                    project_id: None,
+                },
+            ),
+            _ => (
+                PoolProviderType::Qwen,
+                PoolCredentialData::QwenOAuth {
+                    creds_file_path: source_token_path.to_string_lossy().to_string(),
+                },
+            ),
+        };
+
+        // 创建凭证
+        let credential = ProviderCredential::new(provider_type, cred_data);
+        let original_uuid = credential.uuid.clone();
+
+        // 添加凭证（应该复制 token 文件到 auth_dir）
+        let add_result = sync_service.add_credential(&credential);
+        prop_assert!(add_result.is_ok(), "添加 OAuth 凭证应该成功: {:?}", add_result);
+
+        // 验证 token 文件已复制到 auth_dir
+        let auth_dir = sync_service.get_auth_dir().expect("获取 auth_dir 失败");
+        let provider_name = match provider_type {
+            PoolProviderType::Kiro => "kiro",
+            PoolProviderType::Gemini => "gemini",
+            PoolProviderType::Qwen => "qwen",
+            _ => "unknown",
+        };
+        let expected_token_path = auth_dir.join(provider_name).join(format!("{}.json", original_uuid));
+
+        prop_assert!(
+            expected_token_path.exists(),
+            "Token 文件应该存在于 auth_dir: {:?}",
+            expected_token_path
+        );
+
+        // 验证 token 文件内容一致
+        let copied_content = std::fs::read_to_string(&expected_token_path)
+            .expect("读取复制的 token 文件失败");
+        prop_assert_eq!(
+            copied_content,
+            token_json,
+            "Token 文件内容应该一致"
+        );
+
+        // 从配置加载凭证
+        let loaded = sync_service.load_from_config().expect("加载凭证失败");
+        let loaded_cred = loaded.iter().find(|c| c.uuid == original_uuid);
+        prop_assert!(loaded_cred.is_some(), "应该能找到加载的凭证");
+
+        // 验证加载的凭证指向正确的 token 文件路径
+        let loaded_cred = loaded_cred.unwrap();
+        let loaded_path = match &loaded_cred.credential {
+            PoolCredentialData::KiroOAuth { creds_file_path } => creds_file_path.clone(),
+            PoolCredentialData::GeminiOAuth { creds_file_path, .. } => creds_file_path.clone(),
+            PoolCredentialData::QwenOAuth { creds_file_path } => creds_file_path.clone(),
+            _ => String::new(),
+        };
+
+        prop_assert_eq!(
+            loaded_path,
+            expected_token_path.to_string_lossy().to_string(),
+            "加载的凭证应该指向 auth_dir 中的 token 文件"
+        );
+
+        // 删除凭证（应该删除 token 文件）
+        let remove_result = sync_service.remove_credential(provider_type, &original_uuid);
+        prop_assert!(remove_result.is_ok(), "删除凭证应该成功: {:?}", remove_result);
+
+        // 验证 token 文件已被删除
+        prop_assert!(
+            !expected_token_path.exists(),
+            "删除凭证后 token 文件应该被删除"
+        );
+    }
+
+    /// **Feature: config-credential-export, Property 9: OAuth Token File Update**
+    /// *For any* OAuth credential update, the token file should be updated in auth-dir.
+    /// **Validates: Requirements 2.1, 2.4**
+    #[test]
+    fn prop_oauth_token_file_update(
+        initial_content in "[a-zA-Z0-9]{50,100}",
+        updated_content in "[a-zA-Z0-9]{50,100}"
+    ) {
+        let (temp_dir, config_manager) = create_test_env();
+        let sync_service = CredentialSyncService::new(config_manager.clone());
+
+        // 创建初始 token 文件
+        let source_token_dir = temp_dir.path().join("source_tokens");
+        std::fs::create_dir_all(&source_token_dir).expect("创建源目录失败");
+
+        let source_token_path = source_token_dir.join("token.json");
+        let initial_json = format!(r#"{{"access_token": "{}"}}"#, initial_content);
+        std::fs::write(&source_token_path, &initial_json).expect("写入初始 token 文件失败");
+
+        // 创建凭证
+        let credential = ProviderCredential::new(
+            PoolProviderType::Kiro,
+            PoolCredentialData::KiroOAuth {
+                creds_file_path: source_token_path.to_string_lossy().to_string(),
+            },
+        );
+        let original_uuid = credential.uuid.clone();
+
+        // 添加凭证
+        sync_service.add_credential(&credential).expect("添加凭证失败");
+
+        // 更新源 token 文件内容
+        let updated_json = format!(r#"{{"access_token": "{}"}}"#, updated_content);
+        std::fs::write(&source_token_path, &updated_json).expect("更新源 token 文件失败");
+
+        // 更新凭证
+        let mut updated_credential = credential.clone();
+        updated_credential.credential = PoolCredentialData::KiroOAuth {
+            creds_file_path: source_token_path.to_string_lossy().to_string(),
+        };
+
+        let update_result = sync_service.update_credential(&updated_credential);
+        prop_assert!(update_result.is_ok(), "更新凭证应该成功: {:?}", update_result);
+
+        // 验证 auth_dir 中的 token 文件已更新
+        let auth_dir = sync_service.get_auth_dir().expect("获取 auth_dir 失败");
+        let token_path = auth_dir.join("kiro").join(format!("{}.json", original_uuid));
+
+        let stored_content = std::fs::read_to_string(&token_path)
+            .expect("读取存储的 token 文件失败");
+        prop_assert_eq!(
+            stored_content,
+            updated_json,
+            "存储的 token 文件内容应该已更新"
+        );
+    }
+}
+
+// ============ Per-Key Proxy Selection Property Tests ============
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 14: Per-Key Proxy Selection**
+    /// *For any* credential with proxy_url set, requests using that credential
+    /// SHALL use the per-key proxy; otherwise, the global proxy SHALL be used.
+    /// **Validates: Requirements 7.1, 7.2**
+    #[test]
+    fn prop_credential_per_key_proxy_selection(
+        provider in arb_provider_type(),
+        per_key_proxy in "[a-z0-9]{1,10}",
+        global_proxy in "[a-z0-9]{1,10}"
+    ) {
+        let per_key_url = format!("http://{}:8080", per_key_proxy);
+        let global_url = format!("http://{}:8080", global_proxy);
+
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin)
+            .with_global_proxy(Some(global_url.clone()));
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建带 Per-Key 代理的凭证
+        let cred_with_proxy = Credential::new(
+            "cred-with-proxy".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-1".to_string(),
+                base_url: None,
+            },
+        ).with_proxy(Some(per_key_url.clone()));
+
+        // 创建不带 Per-Key 代理的凭证
+        let cred_without_proxy = Credential::new(
+            "cred-without-proxy".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-2".to_string(),
+                base_url: None,
+            },
+        );
+
+        pool.add(cred_with_proxy).unwrap();
+        pool.add(cred_without_proxy).unwrap();
+        lb.register_pool(pool.clone());
+
+        // 验证带 Per-Key 代理的凭证
+        let cred = pool.get("cred-with-proxy").unwrap();
+        prop_assert_eq!(
+            cred.proxy_url(),
+            Some(per_key_url.as_str()),
+            "带 Per-Key 代理的凭证应该返回 Per-Key 代理 URL"
+        );
+
+        // 验证代理选择逻辑
+        let selected_proxy = lb.proxy_factory().select_proxy(cred.proxy_url());
+        prop_assert_eq!(
+            selected_proxy,
+            Some(per_key_url.as_str()),
+            "Per-Key 代理应该优先于全局代理"
+        );
+
+        // 验证不带 Per-Key 代理的凭证
+        let cred = pool.get("cred-without-proxy").unwrap();
+        prop_assert_eq!(
+            cred.proxy_url(),
+            None,
+            "不带 Per-Key 代理的凭证应该返回 None"
+        );
+
+        // 验证回退到全局代理
+        let selected_proxy = lb.proxy_factory().select_proxy(cred.proxy_url());
+        prop_assert_eq!(
+            selected_proxy,
+            Some(global_url.as_str()),
+            "无 Per-Key 代理时应该使用全局代理"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 14: Per-Key Proxy Selection**
+    /// *For any* credential without proxy_url and no global proxy,
+    /// no proxy SHALL be used.
+    /// **Validates: Requirements 7.1, 7.2**
+    #[test]
+    fn prop_credential_no_proxy_when_none_configured(
+        provider in arb_provider_type()
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建不带代理的凭证
+        let cred = Credential::new(
+            "cred-no-proxy".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-1".to_string(),
+                base_url: None,
+            },
+        );
+
+        pool.add(cred).unwrap();
+        lb.register_pool(pool.clone());
+
+        // 验证凭证没有代理
+        let cred = pool.get("cred-no-proxy").unwrap();
+        prop_assert_eq!(
+            cred.proxy_url(),
+            None,
+            "凭证应该没有 Per-Key 代理"
+        );
+
+        // 验证代理选择返回 None
+        let selected_proxy = lb.proxy_factory().select_proxy(cred.proxy_url());
+        prop_assert_eq!(
+            selected_proxy,
+            None,
+            "无全局代理且无 Per-Key 代理时应该不使用代理"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 14: Per-Key Proxy Selection**
+    /// *For any* credential with proxy_url, select_with_client SHALL create
+    /// a client configured with that proxy.
+    /// **Validates: Requirements 7.1, 7.2**
+    #[test]
+    fn prop_select_with_client_uses_per_key_proxy(
+        provider in arb_provider_type(),
+        // Hostname must start with a letter to be valid
+        proxy_host in "[a-z][a-z0-9]{0,9}"
+    ) {
+        let proxy_url = format!("http://{}:8080", proxy_host);
+
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建带代理的凭证
+        let cred = Credential::new(
+            "cred-1".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-1".to_string(),
+                base_url: None,
+            },
+        ).with_proxy(Some(proxy_url.clone()));
+
+        pool.add(cred).unwrap();
+        lb.register_pool(pool);
+
+        // 使用 select_with_client 选择凭证
+        let selection = lb.select_with_client(provider);
+        prop_assert!(selection.is_ok(), "select_with_client 应该成功");
+
+        let selection = selection.unwrap();
+        prop_assert_eq!(
+            selection.credential.proxy_url(),
+            Some(proxy_url.as_str()),
+            "选中的凭证应该有正确的代理 URL"
+        );
+    }
+}
+
+// ============ Proxy Failover Property Tests ============
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 15: Proxy Failover**
+    /// *For any* credential where proxy connection fails, the system
+    /// SHALL attempt the next available credential.
+    /// **Validates: Requirements 7.4**
+    #[test]
+    fn prop_proxy_failover_attempts_next_credential(
+        provider in arb_provider_type(),
+        cred_count in 2usize..=5usize
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建多个凭证，第一个有无效代理，其他有有效代理
+        for i in 0..cred_count {
+            let proxy_url = if i == 0 {
+                // 第一个凭证使用无效代理协议
+                Some("ftp://invalid-proxy:21".to_string())
+            } else {
+                // 其他凭证使用有效代理
+                Some(format!("http://valid-proxy-{}:8080", i))
+            };
+
+            let cred = Credential::new(
+                format!("cred-{}", i),
+                provider,
+                CredentialData::ApiKey {
+                    key: format!("key-{}", i),
+                    base_url: None,
+                },
+            ).with_proxy(proxy_url);
+
+            pool.add(cred).unwrap();
+        }
+
+        lb.register_pool(pool);
+
+        // 使用 select_with_failover 应该跳过无效代理的凭证
+        let result = lb.select_with_failover(provider, None);
+        prop_assert!(result.is_ok(), "故障转移应该成功找到有效凭证");
+
+        let selection = result.unwrap();
+        // 选中的凭证不应该是第一个（无效代理的那个）
+        prop_assert_ne!(
+            selection.credential.id,
+            "cred-0",
+            "应该跳过无效代理的凭证"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 15: Proxy Failover**
+    /// *For any* set of credentials with all valid proxies, select_with_failover
+    /// SHALL succeed on the first attempt.
+    /// **Validates: Requirements 7.4**
+    #[test]
+    fn prop_proxy_failover_succeeds_with_valid_proxies(
+        provider in arb_provider_type(),
+        cred_count in 1usize..=5usize
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建多个凭证，都有有效代理
+        for i in 0..cred_count {
+            let cred = Credential::new(
+                format!("cred-{}", i),
+                provider,
+                CredentialData::ApiKey {
+                    key: format!("key-{}", i),
+                    base_url: None,
+                },
+            ).with_proxy(Some(format!("http://proxy-{}:8080", i)));
+
+            pool.add(cred).unwrap();
+        }
+
+        lb.register_pool(pool);
+
+        // 使用 select_with_failover 应该成功
+        let result = lb.select_with_failover(provider, None);
+        prop_assert!(result.is_ok(), "所有代理有效时应该成功");
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 15: Proxy Failover**
+    /// *For any* set of credentials with all invalid proxies, select_with_failover
+    /// SHALL fail after trying all credentials.
+    /// **Validates: Requirements 7.4**
+    #[test]
+    fn prop_proxy_failover_fails_when_all_invalid(
+        provider in arb_provider_type(),
+        cred_count in 1usize..=3usize
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建多个凭证，都有无效代理
+        for i in 0..cred_count {
+            let cred = Credential::new(
+                format!("cred-{}", i),
+                provider,
+                CredentialData::ApiKey {
+                    key: format!("key-{}", i),
+                    base_url: None,
+                },
+            ).with_proxy(Some(format!("ftp://invalid-proxy-{}:21", i)));
+
+            pool.add(cred).unwrap();
+        }
+
+        lb.register_pool(pool);
+
+        // 使用 select_with_failover 应该失败
+        let result = lb.select_with_failover(provider, None);
+        prop_assert!(result.is_err(), "所有代理无效时应该失败");
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 15: Proxy Failover**
+    /// *For any* credential without proxy, select_with_failover SHALL succeed
+    /// using no proxy.
+    /// **Validates: Requirements 7.4**
+    #[test]
+    fn prop_proxy_failover_succeeds_without_proxy(
+        provider in arb_provider_type()
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建不带代理的凭证
+        let cred = Credential::new(
+            "cred-no-proxy".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-1".to_string(),
+                base_url: None,
+            },
+        );
+
+        pool.add(cred).unwrap();
+        lb.register_pool(pool);
+
+        // 使用 select_with_failover 应该成功
+        let result = lb.select_with_failover(provider, None);
+        prop_assert!(result.is_ok(), "无代理凭证应该成功");
+
+        let selection = result.unwrap();
+        prop_assert_eq!(
+            selection.credential.proxy_url(),
+            None,
+            "选中的凭证应该没有代理"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 15: Proxy Failover**
+    /// *For any* failover_on_proxy_error call, the system SHALL record
+    /// the failure and attempt to select a new credential.
+    /// **Validates: Requirements 7.4**
+    #[test]
+    fn prop_failover_on_proxy_error_records_failure(
+        provider in arb_provider_type()
+    ) {
+        let lb = LoadBalancer::new(BalanceStrategy::RoundRobin);
+        let pool = Arc::new(CredentialPool::new(provider));
+
+        // 创建两个凭证
+        let cred1 = Credential::new(
+            "cred-1".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-1".to_string(),
+                base_url: None,
+            },
+        ).with_proxy(Some("http://proxy1:8080".to_string()));
+
+        let cred2 = Credential::new(
+            "cred-2".to_string(),
+            provider,
+            CredentialData::ApiKey {
+                key: "key-2".to_string(),
+                base_url: None,
+            },
+        ).with_proxy(Some("http://proxy2:8080".to_string()));
+
+        pool.add(cred1).unwrap();
+        pool.add(cred2).unwrap();
+        lb.register_pool(pool.clone());
+
+        // 调用 failover_on_proxy_error
+        let result = lb.failover_on_proxy_error(provider, "cred-1");
+        prop_assert!(result.is_ok(), "故障转移应该成功");
+
+        // 验证失败被记录
+        let cred1 = pool.get("cred-1").unwrap();
+        prop_assert_eq!(
+            cred1.stats.consecutive_failures,
+            1,
+            "失败应该被记录"
+        );
+    }
+}
+
+// ============ 配额管理器属性测试 ============
+
+use crate::config::QuotaExceededConfig;
+use crate::credential::QuotaManager;
+
+/// 生成随机的配额超限配置
+fn arb_quota_config() -> impl Strategy<Value = QuotaExceededConfig> {
+    (proptest::bool::ANY, proptest::bool::ANY, 1u64..=3600u64).prop_map(
+        |(switch_project, switch_preview_model, cooldown_seconds)| QuotaExceededConfig {
+            switch_project,
+            switch_preview_model,
+            cooldown_seconds,
+        },
+    )
+}
+
+/// 生成随机的凭证 ID
+fn arb_credential_id() -> impl Strategy<Value = String> {
+    "[a-zA-Z0-9_-]{1,32}".prop_map(|s| s)
+}
+
+/// 生成随机的错误消息
+fn arb_error_message() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // 配额超限相关消息
+        Just("Rate limit exceeded".to_string()),
+        Just("Quota exceeded for this API".to_string()),
+        Just("Too many requests".to_string()),
+        Just("Request was throttled".to_string()),
+        Just("limit exceeded".to_string()),
+        // 非配额超限消息
+        Just("Bad Request".to_string()),
+        Just("Internal Server Error".to_string()),
+        Just("Not Found".to_string()),
+        Just("Unauthorized".to_string()),
+        Just("Service Unavailable".to_string()),
+    ]
+}
+
+/// 生成随机的 HTTP 状态码
+fn arb_status_code() -> impl Strategy<Value = Option<u16>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(200u16)),
+        Just(Some(400u16)),
+        Just(Some(401u16)),
+        Just(Some(403u16)),
+        Just(Some(404u16)),
+        Just(Some(429u16)), // 配额超限
+        Just(Some(500u16)),
+        Just(Some(502u16)),
+        Just(Some(503u16)),
+        Just(Some(504u16)),
+    ]
+}
+
+/// 生成随机的模型名称
+fn arb_model_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("gemini-2.5-pro".to_string()),
+        Just("gemini-2.5-flash".to_string()),
+        Just("claude-3-opus".to_string()),
+        Just("claude-3-sonnet".to_string()),
+        Just("gpt-4".to_string()),
+        Just("gpt-4-turbo".to_string()),
+        // 已经是预览版本
+        Just("gemini-2.5-pro-preview".to_string()),
+        Just("claude-3-opus-preview-20240101".to_string()),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 16: Quota Exceeded Detection**
+    /// *For any* API response indicating quota exceeded (HTTP 429 or specific error codes),
+    /// the credential SHALL be marked as temporarily unavailable.
+    /// **Validates: Requirements 8.1**
+    #[test]
+    fn prop_quota_exceeded_detection(
+        config in arb_quota_config(),
+        credential_id in arb_credential_id(),
+        status_code in arb_status_code(),
+        error_message in arb_error_message()
+    ) {
+        let manager = QuotaManager::new(config);
+
+        // 检测是否为配额超限错误
+        let is_quota_error = QuotaManager::is_quota_exceeded_error(status_code, &error_message);
+
+        // 验证 429 状态码总是被检测为配额超限
+        if status_code == Some(429) {
+            prop_assert!(
+                is_quota_error,
+                "HTTP 429 应该被检测为配额超限错误"
+            );
+        }
+
+        // 验证包含配额关键词的消息被检测为配额超限
+        let error_lower = error_message.to_lowercase();
+        let has_quota_keyword = ["quota", "rate limit", "rate_limit", "too many requests", "exceeded", "limit exceeded", "throttl"]
+            .iter()
+            .any(|kw| error_lower.contains(kw));
+
+        if has_quota_keyword {
+            prop_assert!(
+                is_quota_error,
+                "包含配额关键词的消息应该被检测为配额超限错误: {}",
+                error_message
+            );
+        }
+
+        // 如果检测到配额超限，标记凭证
+        if is_quota_error {
+            let record = manager.mark_quota_exceeded(&credential_id, &error_message);
+
+            // 验证凭证被标记为不可用
+            prop_assert!(
+                !manager.is_available(&credential_id),
+                "配额超限后凭证应该不可用"
+            );
+
+            // 验证记录包含正确的信息
+            prop_assert_eq!(
+                record.credential_id,
+                credential_id,
+                "记录的凭证 ID 应该正确"
+            );
+            prop_assert_eq!(
+                record.reason,
+                error_message,
+                "记录的原因应该正确"
+            );
+
+            // 验证冷却结束时间在未来
+            prop_assert!(
+                record.cooldown_until > chrono::Utc::now(),
+                "冷却结束时间应该在未来"
+            );
+        }
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 16: Quota Exceeded Detection (Multiple Credentials)**
+    /// *For any* set of credentials, marking multiple as quota exceeded should track each independently.
+    /// **Validates: Requirements 8.1**
+    #[test]
+    fn prop_quota_exceeded_detection_multiple(
+        config in arb_quota_config(),
+        cred_count in 1usize..=10usize
+    ) {
+        let manager = QuotaManager::new(config);
+
+        // 标记多个凭证为配额超限
+        let mut marked_ids = Vec::new();
+        for i in 0..cred_count {
+            let cred_id = format!("cred-{}", i);
+            manager.mark_quota_exceeded(&cred_id, "Rate limit exceeded");
+            marked_ids.push(cred_id);
+        }
+
+        // 验证所有凭证都被标记
+        prop_assert_eq!(
+            manager.exceeded_count(),
+            cred_count,
+            "超限凭证数量应该正确"
+        );
+
+        // 验证每个凭证都不可用
+        for id in &marked_ids {
+            prop_assert!(
+                !manager.is_available(id),
+                "凭证 {} 应该不可用",
+                id
+            );
+        }
+
+        // 验证未标记的凭证仍然可用
+        prop_assert!(
+            manager.is_available("untracked-cred"),
+            "未标记的凭证应该可用"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 17: Quota Auto-Switch**
+    /// *For any* quota-exceeded credential when switch_project is enabled,
+    /// the next request SHALL use a different available credential.
+    /// **Validates: Requirements 8.2**
+    #[test]
+    fn prop_quota_auto_switch(
+        cred_count in 2usize..=10usize,
+        failed_index in 0usize..10usize,
+        model in arb_model_name()
+    ) {
+        let config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: false,
+            cooldown_seconds: 300,
+        };
+        let manager = QuotaManager::new(config);
+
+        // 创建凭证 ID 列表
+        let available: Vec<String> = (0..cred_count)
+            .map(|i| format!("cred-{}", i))
+            .collect();
+
+        let failed_index = failed_index % cred_count;
+        let failed_cred = &available[failed_index];
+
+        // 处理配额超限
+        let result = manager.handle_quota_exceeded(
+            failed_cred,
+            &model,
+            &available,
+            "Rate limit exceeded",
+        );
+
+        // 验证：应该切换到不同的凭证
+        prop_assert!(
+            result.switched,
+            "当 switch_project 启用且有其他可用凭证时，应该切换"
+        );
+
+        // 验证：新凭证不是失败的凭证
+        let failed_cred_string = failed_cred.to_string();
+        prop_assert_ne!(
+            result.new_credential_id.as_ref(),
+            Some(&failed_cred_string),
+            "新凭证不应该是失败的凭证"
+        );
+
+        // 验证：新凭证在可用列表中
+        prop_assert!(
+            available.contains(result.new_credential_id.as_ref().unwrap()),
+            "新凭证应该在可用列表中"
+        );
+
+        // 验证：失败的凭证被标记为不可用
+        prop_assert!(
+            !manager.is_available(failed_cred),
+            "失败的凭证应该被标记为不可用"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 17: Quota Auto-Switch (Disabled)**
+    /// *For any* quota-exceeded credential when switch_project is disabled,
+    /// the system SHALL NOT automatically switch to another credential.
+    /// **Validates: Requirements 8.2**
+    #[test]
+    fn prop_quota_auto_switch_disabled(
+        cred_count in 2usize..=10usize,
+        failed_index in 0usize..10usize,
+        model in arb_model_name()
+    ) {
+        let config = QuotaExceededConfig {
+            switch_project: false,
+            switch_preview_model: false,
+            cooldown_seconds: 300,
+        };
+        let manager = QuotaManager::new(config);
+
+        // 创建凭证 ID 列表
+        let available: Vec<String> = (0..cred_count)
+            .map(|i| format!("cred-{}", i))
+            .collect();
+
+        let failed_index = failed_index % cred_count;
+        let failed_cred = &available[failed_index];
+
+        // 处理配额超限
+        let result = manager.handle_quota_exceeded(
+            failed_cred,
+            &model,
+            &available,
+            "Rate limit exceeded",
+        );
+
+        // 验证：不应该切换凭证
+        prop_assert!(
+            !result.switched,
+            "当 switch_project 禁用时，不应该切换凭证"
+        );
+
+        // 验证：失败的凭证仍然被标记为不可用
+        prop_assert!(
+            !manager.is_available(failed_cred),
+            "失败的凭证应该被标记为不可用"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 17: Quota Auto-Switch (All Exhausted)**
+    /// *For any* set of credentials where all are quota-exceeded,
+    /// the system SHALL return an appropriate error.
+    /// **Validates: Requirements 8.2, 8.4**
+    #[test]
+    fn prop_quota_auto_switch_all_exhausted(
+        cred_count in 1usize..=5usize,
+        model in arb_model_name()
+    ) {
+        let config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: false,
+            cooldown_seconds: 300,
+        };
+        let manager = QuotaManager::new(config);
+
+        // 创建凭证 ID 列表
+        let available: Vec<String> = (0..cred_count)
+            .map(|i| format!("cred-{}", i))
+            .collect();
+
+        // 标记所有凭证为配额超限
+        for cred_id in &available {
+            manager.mark_quota_exceeded(cred_id, "Rate limit exceeded");
+        }
+
+        // 处理最后一个凭证的配额超限
+        let result = manager.handle_quota_exceeded(
+            &available[0],
+            &model,
+            &available,
+            "Rate limit exceeded",
+        );
+
+        // 验证：不应该切换（没有可用凭证）
+        prop_assert!(
+            !result.switched,
+            "当所有凭证都超限时，不应该切换"
+        );
+
+        // 验证：消息应该表明所有凭证都超限
+        prop_assert!(
+            result.message.contains("所有凭证配额超限"),
+            "消息应该表明所有凭证都超限: {}",
+            result.message
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// **Feature: cliproxyapi-parity, Property 18: Quota Cooldown Expiration**
+    /// *For any* quota-exceeded credential, after the cooldown period expires,
+    /// the credential SHALL be restored to available status.
+    /// **Validates: Requirements 8.5**
+    #[test]
+    fn prop_quota_cooldown_expiration(
+        cred_count in 1usize..=10usize
+    ) {
+        // 使用 0 秒冷却时间，立即过期
+        let config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: true,
+            cooldown_seconds: 0, // 立即过期
+        };
+        let manager = QuotaManager::new(config);
+
+        // 标记多个凭证为配额超限
+        let cred_ids: Vec<String> = (0..cred_count)
+            .map(|i| format!("cred-{}", i))
+            .collect();
+
+        for cred_id in &cred_ids {
+            manager.mark_quota_exceeded(cred_id, "Rate limit exceeded");
+        }
+
+        // 验证所有凭证都被标记
+        prop_assert_eq!(
+            manager.exceeded_count(),
+            cred_count,
+            "所有凭证应该被标记为超限"
+        );
+
+        // 等待一小段时间确保过期
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // 清理过期记录
+        let cleaned = manager.cleanup_expired();
+
+        // 验证：所有记录都被清理
+        prop_assert_eq!(
+            cleaned,
+            cred_count,
+            "所有过期记录应该被清理"
+        );
+
+        // 验证：所有凭证都恢复可用
+        for cred_id in &cred_ids {
+            prop_assert!(
+                manager.is_available(cred_id),
+                "凭证 {} 应该恢复可用",
+                cred_id
+            );
+        }
+
+        // 验证：超限计数为 0
+        prop_assert_eq!(
+            manager.exceeded_count(),
+            0,
+            "超限凭证数量应该为 0"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 18: Quota Cooldown Expiration (Not Expired)**
+    /// *For any* quota-exceeded credential within the cooldown period,
+    /// the credential SHALL remain unavailable.
+    /// **Validates: Requirements 8.5**
+    #[test]
+    fn prop_quota_cooldown_not_expired(
+        cred_count in 1usize..=10usize
+    ) {
+        // 使用较长的冷却时间
+        let config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: true,
+            cooldown_seconds: 3600, // 1 小时
+        };
+        let manager = QuotaManager::new(config);
+
+        // 标记多个凭证为配额超限
+        let cred_ids: Vec<String> = (0..cred_count)
+            .map(|i| format!("cred-{}", i))
+            .collect();
+
+        for cred_id in &cred_ids {
+            manager.mark_quota_exceeded(cred_id, "Rate limit exceeded");
+        }
+
+        // 尝试清理（不应该清理任何记录）
+        let cleaned = manager.cleanup_expired();
+
+        // 验证：没有记录被清理
+        prop_assert_eq!(
+            cleaned,
+            0,
+            "未过期的记录不应该被清理"
+        );
+
+        // 验证：所有凭证仍然不可用
+        for cred_id in &cred_ids {
+            prop_assert!(
+                !manager.is_available(cred_id),
+                "凭证 {} 应该仍然不可用",
+                cred_id
+            );
+        }
+
+        // 验证：超限计数不变
+        prop_assert_eq!(
+            manager.exceeded_count(),
+            cred_count,
+            "超限凭证数量应该不变"
+        );
+    }
+
+    /// **Feature: cliproxyapi-parity, Property 18: Quota Cooldown Expiration (Partial)**
+    /// *For any* set of credentials with mixed expiration states,
+    /// only expired credentials SHALL be restored.
+    /// **Validates: Requirements 8.5**
+    #[test]
+    fn prop_quota_cooldown_partial_expiration(
+        expired_count in 1usize..=5usize,
+        active_count in 1usize..=5usize
+    ) {
+        // 创建两个管理器：一个立即过期，一个长时间冷却
+        let expired_config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: true,
+            cooldown_seconds: 0, // 立即过期
+        };
+        let active_config = QuotaExceededConfig {
+            switch_project: true,
+            switch_preview_model: true,
+            cooldown_seconds: 3600, // 1 小时
+        };
+
+        // 使用一个管理器，但手动设置不同的过期时间
+        let manager = QuotaManager::new(active_config);
+
+        // 标记一些凭证为立即过期
+        let expired_ids: Vec<String> = (0..expired_count)
+            .map(|i| format!("expired-{}", i))
+            .collect();
+
+        // 标记一些凭证为长时间冷却
+        let active_ids: Vec<String> = (0..active_count)
+            .map(|i| format!("active-{}", i))
+            .collect();
+
+        // 先标记所有凭证
+        for cred_id in &expired_ids {
+            manager.mark_quota_exceeded(cred_id, "Rate limit exceeded");
+        }
+        for cred_id in &active_ids {
+            manager.mark_quota_exceeded(cred_id, "Rate limit exceeded");
+        }
+
+        // 手动将 expired_ids 的冷却时间设置为过去
+        for cred_id in &expired_ids {
+            manager.set_cooldown_until(cred_id, chrono::Utc::now() - chrono::Duration::seconds(1));
+        }
+
+        // 清理过期记录
+        let cleaned = manager.cleanup_expired();
+
+        // 验证：只有过期的记录被清理
+        prop_assert_eq!(
+            cleaned,
+            expired_count,
+            "只有过期的记录应该被清理"
+        );
+
+        // 验证：过期的凭证恢复可用
+        for cred_id in &expired_ids {
+            prop_assert!(
+                manager.is_available(cred_id),
+                "过期的凭证 {} 应该恢复可用",
+                cred_id
+            );
+        }
+
+        // 验证：未过期的凭证仍然不可用
+        for cred_id in &active_ids {
+            prop_assert!(
+                !manager.is_available(cred_id),
+                "未过期的凭证 {} 应该仍然不可用",
+                cred_id
+            );
+        }
+    }
+}

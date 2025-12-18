@@ -51,7 +51,11 @@
 ### 🎯 多 Provider 统一管理
 - **Kiro Claude** - 通过 OAuth 免费使用 Claude Sonnet 4.5
 - **Gemini CLI** - 通过 OAuth 突破 Gemini 免费限制
+- **Gemini API Key** - 多账号负载均衡，支持模型排除
 - **通义千问** - 通过 OAuth 使用 Qwen3 Coder Plus
+- **OpenAI Codex** - 通过 OAuth 使用 GPT 模型
+- **iFlow** - 支持 OAuth 和 Cookie 两种认证方式
+- **Vertex AI** - Google Cloud AI 平台，支持模型别名
 - **OpenAI 自定义** - 配置自定义 OpenAI 兼容 API
 - **Claude 自定义** - 配置自定义 Claude API
 
@@ -66,12 +70,27 @@
 - 一键读取本地 OAuth 凭证
 - Token 过期自动刷新
 - 环境变量导出（.env 格式）
+- **配额超限自动切换** - 自动切换到下一个可用凭证
+- **预览模型回退** - 主模型配额用尽时尝试预览版本
+- **Per-Key 代理** - 为每个凭证单独配置代理
+
+### 🔐 安全与管理
+- **TLS/HTTPS 支持** - 可选启用 HTTPS 加密通信
+- **远程管理 API** - 通过 API 远程管理配置和凭证
+- **访问控制** - 支持 localhost 限制和密钥认证
+
+### 🔌 Amp CLI 集成
+- 支持 `/api/provider/{provider}/v1/*` 路由模式
+- 模型映射 - 将不可用模型映射到可用替代
+- 管理端点代理 - 代理认证和账户功能
 
 ### 🌐 完整 API 兼容
 - `/v1/chat/completions` - OpenAI Chat API
 - `/v1/models` - 模型列表
 - `/v1/messages` - Anthropic Messages API
 - `/v1/messages/count_tokens` - Token 计数
+- `/api/provider/{provider}/v1/*` - Amp CLI 路由
+- `/v0/management/*` - 远程管理 API
 
 ---
 

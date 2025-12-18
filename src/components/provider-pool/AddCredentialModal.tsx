@@ -15,6 +15,9 @@ const defaultCredsPath: Record<string, string> = {
   gemini: "~/.gemini/oauth_creds.json",
   qwen: "~/.qwen/oauth_creds.json",
   antigravity: "~/.antigravity/oauth_creds.json",
+  codex: "~/.codex/oauth.json",
+  claude_oauth: "~/.claude/oauth.json",
+  iflow: "~/.iflow/oauth.json",
 };
 
 export function AddCredentialModal({
@@ -36,9 +39,15 @@ export function AddCredentialModal({
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
 
-  const isOAuth = ["kiro", "gemini", "qwen", "antigravity"].includes(
-    providerType,
-  );
+  const isOAuth = [
+    "kiro",
+    "gemini",
+    "qwen",
+    "antigravity",
+    "codex",
+    "claude_oauth",
+    "iflow",
+  ].includes(providerType);
 
   const providerLabels: Record<PoolProviderType, string> = {
     kiro: "Kiro (AWS)",
@@ -47,6 +56,9 @@ export function AddCredentialModal({
     openai: "OpenAI",
     claude: "Claude (Anthropic)",
     antigravity: "Antigravity (Gemini 3 Pro)",
+    codex: "Codex (OpenAI OAuth)",
+    claude_oauth: "Claude OAuth",
+    iflow: "iFlow",
   };
 
   const handleSelectFile = async () => {
@@ -89,6 +101,15 @@ export function AddCredentialModal({
             break;
           case "qwen":
             await providerPoolApi.addQwenOAuth(credsFilePath, trimmedName);
+            break;
+          case "codex":
+            await providerPoolApi.addCodexOAuth(credsFilePath, trimmedName);
+            break;
+          case "claude_oauth":
+            await providerPoolApi.addClaudeOAuth(credsFilePath, trimmedName);
+            break;
+          case "iflow":
+            await providerPoolApi.addIFlowOAuth(credsFilePath, trimmedName);
             break;
         }
       } else {
@@ -183,6 +204,10 @@ export function AddCredentialModal({
                     "默认路径: ~/.gemini/oauth_creds.json"}
                   {providerType === "qwen" &&
                     "默认路径: ~/.qwen/oauth_creds.json"}
+                  {providerType === "codex" && "默认路径: ~/.codex/oauth.json"}
+                  {providerType === "claude_oauth" &&
+                    "默认路径: ~/.claude/oauth.json"}
+                  {providerType === "iflow" && "默认路径: ~/.iflow/oauth.json"}
                 </p>
               </div>
 

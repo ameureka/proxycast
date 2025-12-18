@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Activity,
   Server,
@@ -9,6 +9,10 @@ import {
   Globe,
   CheckCircle2,
   AlertCircle,
+  FileText,
+  Coins,
+  RefreshCw,
+  LayoutDashboard,
 } from "lucide-react";
 import {
   getServerStatus,
@@ -18,14 +22,44 @@ import {
   getDefaultProvider,
 } from "@/hooks/useTauri";
 import { useAllOAuthCredentials } from "@/hooks/useOAuthCredentials";
+import { StatsOverview } from "./monitoring/StatsOverview";
+import { LogViewer } from "./monitoring/LogViewer";
+import { TokenStats } from "./monitoring/TokenStats";
+import {
+  getDashboardData,
+  getRequestLogs,
+  clearRequestLogs,
+  getTokenStatsByDay,
+  getTokenStatsByProvider,
+  type DashboardData,
+  type RequestLog,
+  type PeriodTokenStats,
+  type ProviderTokenStats,
+  type RequestStatus,
+} from "@/lib/api/telemetry";
+
+type TabType = "overview" | "stats" | "logs" | "tokens";
 
 export function Dashboard() {
+  const [activeTab, setActiveTab] = useState<TabType>("overview");
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [defaultProvider, setDefaultProvider] = useState<string>("kiro");
   const { credentials: oauthCredentials, reload: reloadCredentials } =
     useAllOAuthCredentials();
 
+  // 监控数据状态
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(
+    null,
+  );
+  const [logs, setLogs] = useState<RequestLog[]>([]);
+  const [tokensByDay, setTokensByDay] = useState<PeriodTokenStats[]>([]);
+  const [tokensByProvider, setTokensByProvider] = useState<
+    Record<string, ProviderTokenStats>
+  >({});
+  const [monitoringLoading, setMonitoringLoading] = useState(false);
+
+  // 获取基础数据
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -48,6 +82,67 @@ export function Dashboard() {
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [reloadCredentials]);
+
+  // 获取监控数据
+  const fetchMonitoringData = useCallback(async () => {
+    try {
+      setMonitoringLoading(true);
+      const [dashboard, logsData, dayStats, providerStats] = await Promise.all([
+        getDashboardData(),
+        getRequestLogs({ limit: 100 }),
+        getTokenStatsByDay(7),
+        getTokenStatsByProvider({ preset: "7d" }),
+      ]);
+
+      setDashboardData(dashboard);
+      setLogs(logsData);
+      setTokensByDay(dayStats);
+      setTokensByProvider(providerStats);
+    } catch (e) {
+      console.error("Failed to fetch monitoring data:", e);
+    } finally {
+      setMonitoringLoading(false);
+    }
+  }, []);
+
+  // 切换到监控相关标签时加载数据
+  useEffect(() => {
+    if (activeTab !== "overview") {
+      fetchMonitoringData();
+    }
+  }, [activeTab, fetchMonitoringData]);
+
+  // 定时刷新监控数据
+  useEffect(() => {
+    if (activeTab !== "overview") {
+      const interval = setInterval(fetchMonitoringData, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab, fetchMonitoringData]);
+
+  const handleClearLogs = async () => {
+    try {
+      await clearRequestLogs();
+      setLogs([]);
+    } catch (e) {
+      console.error("Failed to clear logs:", e);
+    }
+  };
+
+  const handleFilterLogs = async (filter: {
+    provider?: string;
+    status?: RequestStatus;
+  }) => {
+    try {
+      const filteredLogs = await getRequestLogs({
+        ...filter,
+        limit: 100,
+      });
+      setLogs(filteredLogs);
+    } catch (e) {
+      console.error("Failed to filter logs:", e);
+    }
+  };
 
   const formatUptime = (secs: number) => {
     const h = Math.floor(secs / 3600);
@@ -76,13 +171,124 @@ export function Dashboard() {
     }
   };
 
+  const tabs: { id: TabType; label: string; icon: React.ElementType }[] = [
+    { id: "overview", label: "概览", icon: LayoutDashboard },
+    { id: "stats", label: "统计", icon: Activity },
+    { id: "logs", label: "日志", icon: FileText },
+    { id: "tokens", label: "Token", icon: Coins },
+  ];
+
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">仪表盘</h2>
-        <p className="text-muted-foreground">系统状态概览</p>
+      {/* 页面标题 */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold">仪表盘</h2>
+          <p className="text-muted-foreground">系统状态与监控</p>
+        </div>
+        {activeTab !== "overview" && (
+          <button
+            onClick={fetchMonitoringData}
+            disabled={monitoringLoading}
+            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${monitoringLoading ? "animate-spin" : ""}`}
+            />
+            刷新
+          </button>
+        )}
       </div>
 
+      {/* 标签页 */}
+      <div className="flex gap-1 border-b">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.id
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <tab.icon className="h-4 w-4" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* 内容区域 */}
+      {activeTab === "overview" && (
+        <OverviewTab
+          status={status}
+          config={config}
+          defaultProvider={defaultProvider}
+          oauthCredentials={oauthCredentials}
+          serverUrl={serverUrl}
+          formatUptime={formatUptime}
+          getProviderName={getProviderName}
+        />
+      )}
+
+      {activeTab === "stats" && dashboardData && (
+        <StatsOverview
+          stats={dashboardData.stats}
+          byProvider={dashboardData.by_provider}
+        />
+      )}
+
+      {activeTab === "logs" && (
+        <LogViewer
+          logs={logs}
+          onClear={handleClearLogs}
+          onFilter={handleFilterLogs}
+        />
+      )}
+
+      {activeTab === "tokens" && dashboardData && (
+        <TokenStats
+          summary={dashboardData.tokens}
+          byProvider={tokensByProvider}
+          byDay={tokensByDay}
+        />
+      )}
+
+      {/* 加载状态 */}
+      {activeTab !== "overview" && monitoringLoading && !dashboardData && (
+        <div className="flex items-center justify-center py-12">
+          <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 概览标签页内容
+function OverviewTab({
+  status,
+  config,
+  defaultProvider,
+  oauthCredentials,
+  serverUrl,
+  formatUptime,
+  getProviderName,
+}: {
+  status: ServerStatus | null;
+  config: Config | null;
+  defaultProvider: string;
+  oauthCredentials: Array<{
+    provider: string;
+    is_valid: boolean;
+    loaded: boolean;
+    has_access_token: boolean;
+  }>;
+  serverUrl: string;
+  formatUptime: (secs: number) => string;
+  getProviderName: (id: string) => string;
+}) {
+  return (
+    <div className="space-y-6">
       {/* Server Status Cards */}
       <div className="grid grid-cols-4 gap-4">
         <div className="rounded-lg border bg-card p-4">

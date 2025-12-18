@@ -17,6 +17,8 @@ export interface ErrorInfo {
     | "reset"
     | "health_check"
     | "refresh_token"
+    | "migrate"
+    | "config"
     | "general"
     | "success";
   uuid?: string; // 相关凭证的UUID（如果有的话）
@@ -58,6 +60,18 @@ const ErrorTypeConfig = {
     color: "text-purple-600 dark:text-purple-400",
     bgColor: "bg-purple-50 dark:bg-purple-950/30",
     borderColor: "border-purple-200 dark:border-purple-800",
+  },
+  migrate: {
+    icon: AlertTriangle,
+    color: "text-cyan-600 dark:text-cyan-400",
+    bgColor: "bg-cyan-50 dark:bg-cyan-950/30",
+    borderColor: "border-cyan-200 dark:border-cyan-800",
+  },
+  config: {
+    icon: Settings,
+    color: "text-indigo-600 dark:text-indigo-400",
+    bgColor: "bg-indigo-50 dark:bg-indigo-950/30",
+    borderColor: "border-indigo-200 dark:border-indigo-800",
   },
   general: {
     icon: AlertTriangle,

@@ -54,6 +54,21 @@ impl ClaudeCustomProvider {
         self.config.api_key.is_some() && self.config.enabled
     }
 
+    /// 构建完整的 API URL
+    /// 智能处理用户输入的 base_url，无论是否带 /v1 都能正确工作
+    fn build_url(&self, endpoint: &str) -> String {
+        let base = self.get_base_url();
+        let base = base.trim_end_matches('/');
+
+        // 如果用户输入了带 /v1 的 URL，直接拼接 endpoint
+        // 否则拼接 /v1/endpoint
+        if base.ends_with("/v1") {
+            format!("{}/{}", base, endpoint)
+        } else {
+            format!("{}/v1/{}", base, endpoint)
+        }
+    }
+
     /// 调用 Anthropic API（原生格式）
     pub async fn call_api(
         &self,
@@ -65,8 +80,15 @@ impl ClaudeCustomProvider {
             .as_ref()
             .ok_or("Claude API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/v1/messages");
+        let url = self.build_url("messages");
+
+        // 打印请求 URL 和模型用于调试
+        tracing::info!(
+            "[CLAUDE_API] 发送请求: url={} model={} stream={}",
+            url,
+            request.model,
+            request.stream
+        );
 
         let resp = self
             .client
@@ -77,6 +99,13 @@ impl ClaudeCustomProvider {
             .json(request)
             .send()
             .await?;
+
+        // 打印响应状态
+        tracing::info!(
+            "[CLAUDE_API] 响应状态: status={} model={}",
+            resp.status(),
+            request.model
+        );
 
         Ok(resp)
     }
@@ -144,8 +173,15 @@ impl ClaudeCustomProvider {
             .as_ref()
             .ok_or("Claude API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/v1/messages");
+        let url = self.build_url("messages");
+
+        // 打印请求 URL 和模型用于调试
+        tracing::info!(
+            "[CLAUDE_API] 发送请求 (OpenAI 格式转换): url={} model={} stream={}",
+            url,
+            request.model,
+            request.stream
+        );
 
         let resp = self
             .client
@@ -157,8 +193,15 @@ impl ClaudeCustomProvider {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        // 打印响应状态
+        let status = resp.status();
+        tracing::info!(
+            "[CLAUDE_API] 响应状态: status={} model={}",
+            status,
+            request.model
+        );
+
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("Claude API error: {status} - {body}").into());
         }
@@ -206,8 +249,23 @@ impl ClaudeCustomProvider {
             .as_ref()
             .ok_or("Claude API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/v1/messages");
+        let url = self.build_url("messages");
+
+        // 打印请求 URL 用于调试
+        let model = request
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+        let stream = request
+            .get("stream")
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
+        tracing::info!(
+            "[CLAUDE_API] 发送请求 (原始 JSON): url={} model={} stream={}",
+            url,
+            model,
+            stream
+        );
 
         let resp = self
             .client
@@ -218,6 +276,13 @@ impl ClaudeCustomProvider {
             .json(request)
             .send()
             .await?;
+
+        // 打印响应状态
+        tracing::info!(
+            "[CLAUDE_API] 响应状态: status={} model={}",
+            resp.status(),
+            model
+        );
 
         Ok(resp)
     }
@@ -232,8 +297,7 @@ impl ClaudeCustomProvider {
             .as_ref()
             .ok_or("Claude API key not configured")?;
 
-        let base_url = self.get_base_url();
-        let url = format!("{base_url}/v1/messages/count_tokens");
+        let url = self.build_url("messages/count_tokens");
 
         let resp = self
             .client

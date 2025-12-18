@@ -7,7 +7,10 @@ export type PoolProviderType =
   | "qwen"
   | "antigravity"
   | "openai"
-  | "claude";
+  | "claude"
+  | "codex"
+  | "claude_oauth"
+  | "iflow";
 
 // Credential data types
 export interface KiroOAuthCredential {
@@ -44,13 +47,37 @@ export interface ClaudeKeyCredential {
   base_url?: string;
 }
 
+export interface CodexOAuthCredential {
+  type: "codex_oauth";
+  creds_file_path: string;
+}
+
+export interface ClaudeOAuthCredential {
+  type: "claude_oauth";
+  creds_file_path: string;
+}
+
+export interface IFlowOAuthCredential {
+  type: "iflow_oauth";
+  creds_file_path: string;
+}
+
+export interface IFlowCookieCredential {
+  type: "iflow_cookie";
+  creds_file_path: string;
+}
+
 export type CredentialData =
   | KiroOAuthCredential
   | GeminiOAuthCredential
   | QwenOAuthCredential
   | AntigravityOAuthCredential
   | OpenAIKeyCredential
-  | ClaudeKeyCredential;
+  | ClaudeKeyCredential
+  | CodexOAuthCredential
+  | ClaudeOAuthCredential
+  | IFlowOAuthCredential
+  | IFlowCookieCredential;
 
 // Provider credential
 export interface ProviderCredential {
@@ -73,6 +100,9 @@ export interface ProviderCredential {
   created_at: string;
   updated_at: string;
 }
+
+// Credential source type
+export type CredentialSource = "manual" | "imported" | "private";
 
 // Credential display (for UI, hides sensitive data)
 export interface CredentialDisplay {
@@ -97,6 +127,12 @@ export interface CredentialDisplay {
   token_cache_status?: TokenCacheStatus;
   created_at: string;
   updated_at: string;
+  // 凭证来源（手动添加/导入/私有）
+  source: CredentialSource;
+  // API Key 凭证的 base_url（仅用于 OpenAI/Claude API Key 类型）
+  base_url?: string;
+  // API Key 凭证的完整 api_key（仅用于 OpenAI/Claude API Key 类型，用于编辑）
+  api_key?: string;
 }
 
 // Pool statistics
@@ -164,6 +200,10 @@ export interface UpdateCredentialRequest {
   new_creds_file_path?: string;
   /// OAuth相关：新的project_id（仅适用于Gemini）
   new_project_id?: string;
+  /// API Key 相关：新的 base_url（仅适用于 API Key 凭证）
+  new_base_url?: string;
+  /// API Key 相关：新的 api_key（仅适用于 API Key 凭证）
+  new_api_key?: string;
 }
 
 export const providerPoolApi = {
@@ -195,8 +235,11 @@ export const providerPoolApi = {
   },
 
   // Delete a credential
-  async deleteCredential(uuid: string): Promise<boolean> {
-    return invoke("delete_provider_pool_credential", { uuid });
+  async deleteCredential(
+    uuid: string,
+    providerType?: PoolProviderType,
+  ): Promise<boolean> {
+    return invoke("delete_provider_pool_credential", { uuid, providerType });
   },
 
   // Toggle credential enabled/disabled
@@ -284,6 +327,34 @@ export const providerPoolApi = {
     });
   },
 
+  async addCodexOAuth(
+    credsFilePath: string,
+    name?: string,
+  ): Promise<ProviderCredential> {
+    return invoke("add_codex_oauth_credential", { credsFilePath, name });
+  },
+
+  async addClaudeOAuth(
+    credsFilePath: string,
+    name?: string,
+  ): Promise<ProviderCredential> {
+    return invoke("add_claude_oauth_credential", { credsFilePath, name });
+  },
+
+  async addIFlowOAuth(
+    credsFilePath: string,
+    name?: string,
+  ): Promise<ProviderCredential> {
+    return invoke("add_iflow_oauth_credential", { credsFilePath, name });
+  },
+
+  async addIFlowCookie(
+    credsFilePath: string,
+    name?: string,
+  ): Promise<ProviderCredential> {
+    return invoke("add_iflow_cookie_credential", { credsFilePath, name });
+  },
+
   // OAuth token management
   async refreshCredentialToken(uuid: string): Promise<string> {
     return invoke("refresh_pool_credential_token", { uuid });
@@ -292,4 +363,16 @@ export const providerPoolApi = {
   async getCredentialOAuthStatus(uuid: string): Promise<OAuthStatus> {
     return invoke("get_pool_credential_oauth_status", { uuid });
   },
+
+  // Migration API
+  async migratePrivateConfig(config: unknown): Promise<MigrationResult> {
+    return invoke("migrate_private_config_to_pool", { config });
+  },
 };
+
+// Migration result
+export interface MigrationResult {
+  migrated_count: number;
+  skipped_count: number;
+  errors: string[];
+}

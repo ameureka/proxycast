@@ -44,10 +44,24 @@ pub struct KiroCredentials {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub profile_arn: Option<String>,
+    /// 过期时间（支持 RFC3339 格式和时间戳格式）
     pub expires_at: Option<String>,
+    /// 过期时间（RFC3339 格式）- 与 CLIProxyAPI 兼容
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expire: Option<String>,
     pub region: Option<String>,
     pub auth_method: Option<String>,
     pub client_id_hash: Option<String>,
+    /// 最后刷新时间（RFC3339 格式）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<String>,
+    /// 凭证类型标识
+    #[serde(default = "default_kiro_type", rename = "type")]
+    pub cred_type: String,
+}
+
+fn default_kiro_type() -> String {
+    "kiro".to_string()
 }
 
 impl Default for KiroCredentials {
@@ -59,9 +73,12 @@ impl Default for KiroCredentials {
             client_secret: None,
             profile_arn: None,
             expires_at: None,
+            expire: None,
             region: Some("us-east-1".to_string()),
             auth_method: Some("social".to_string()),
             client_id_hash: None,
+            last_refresh: None,
+            cred_type: default_kiro_type(),
         }
     }
 }
@@ -207,13 +224,15 @@ impl KiroProvider {
         Ok(())
     }
 
-    /// 从指定路径加载凭证（包括 clientIdHash 文件和同目录的其他 JSON 文件）
+    /// 从指定路径加载凭证
+    ///
+    /// 副本文件应包含完整的 client_id/client_secret（在复制时已合并）。
+    /// 如果副本文件中没有，会尝试从 clientIdHash 文件读取作为回退。
     pub async fn load_credentials_from_path(
         &mut self,
         path: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = std::path::PathBuf::from(path);
-        let dir = path.parent().ok_or("Invalid path: no parent directory")?;
 
         let mut merged = KiroCredentials::default();
 
@@ -222,112 +241,130 @@ impl KiroProvider {
             let content = tokio::fs::read_to_string(&path).await?;
             let creds: KiroCredentials = serde_json::from_str(&content)?;
             tracing::info!(
-                "[KIRO] Main file loaded from {:?}: has_access={}, has_refresh={}, has_client_id={}, auth_method={:?}, clientIdHash={:?}",
+                "[KIRO] 加载凭证文件 {:?}: has_access={}, has_refresh={}, has_client_id={}, has_client_secret={}, auth_method={:?}",
                 path,
                 creds.access_token.is_some(),
                 creds.refresh_token.is_some(),
                 creds.client_id.is_some(),
-                creds.auth_method,
-                creds.client_id_hash
+                creds.client_secret.is_some(),
+                creds.auth_method
             );
             merge_credentials(&mut merged, &creds);
+        } else {
+            return Err(format!("凭证文件不存在: {:?}", path).into());
         }
 
-        // 如果有 clientIdHash，尝试从 ~/.aws/sso/cache/ 目录加载对应的 client_id 和 client_secret
-        if let Some(hash) = &merged.client_id_hash {
-            // clientIdHash 文件总是在 ~/.aws/sso/cache/ 目录中
+        // 如果副本文件中已有 client_id/client_secret，直接使用（方案B：完全独立）
+        if merged.client_id.is_some() && merged.client_secret.is_some() {
+            tracing::info!("[KIRO] 副本文件包含完整的 client_id/client_secret，无需读取外部文件");
+        } else {
+            // 回退：尝试从外部文件读取（兼容旧的副本文件）
             let aws_sso_cache_dir = dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".aws")
                 .join("sso")
                 .join("cache");
-            let hash_file_path = aws_sso_cache_dir.join(format!("{}.json", hash));
 
-            tracing::debug!(
-                "[KIRO] 检查 clientIdHash 文件: {}",
-                hash_file_path.display()
-            );
+            let mut found_credentials = false;
 
-            if tokio::fs::try_exists(&hash_file_path)
-                .await
-                .unwrap_or(false)
-            {
-                if let Ok(content) = tokio::fs::read_to_string(&hash_file_path).await {
-                    // 使用 serde_json::Value 来更灵活地解析，因为 hash 文件可能包含额外字段
-                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&content) {
-                        // 直接提取 clientId 和 clientSecret
-                        let client_id = json_value
-                            .get("clientId")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let client_secret = json_value
-                            .get("clientSecret")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        tracing::debug!(
-                            "[KIRO] Hash file {:?}: has_client_id={}, has_client_secret={}",
-                            hash_file_path.file_name(),
-                            client_id.is_some(),
-                            client_secret.is_some()
-                        );
-
-                        if client_id.is_some() {
-                            merged.client_id = client_id;
-                        }
-                        if client_secret.is_some() {
-                            merged.client_secret = client_secret;
-                        }
-                    } else {
-                        tracing::warn!(
-                            "[KIRO] 无法解析 clientIdHash 文件 JSON: {}",
-                            hash_file_path.display()
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "[KIRO] 无法读取 clientIdHash 文件: {}",
-                        hash_file_path.display()
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "[KIRO] clientIdHash {} 指向的文件不存在: {}",
-                    hash,
-                    hash_file_path.display()
+            // 方式1：如果有 clientIdHash，尝试从对应文件读取
+            if let Some(hash) = &merged.client_id_hash.clone() {
+                tracing::info!(
+                    "[KIRO] 副本文件缺少 client_id/client_secret，尝试从 clientIdHash 文件读取"
                 );
-            }
-        } else {
-            tracing::debug!("[KIRO] 没有 clientIdHash 字段，尝试扫描同目录文件");
-        }
+                let hash_file_path = aws_sso_cache_dir.join(format!("{}.json", hash));
 
-        // 如果还没有 client_id/client_secret，读取目录中其他 JSON 文件
-        if merged.client_id.is_none() || merged.client_secret.is_none() {
-            if tokio::fs::try_exists(dir).await.unwrap_or(false) {
-                let mut entries = tokio::fs::read_dir(dir).await?;
-                while let Some(entry) = entries.next_entry().await? {
-                    let file_path = entry.path();
-                    if file_path.extension().map(|e| e == "json").unwrap_or(false)
-                        && file_path != path
-                    {
-                        if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
-                            if let Ok(creds) = serde_json::from_str::<KiroCredentials>(&content) {
+                if tokio::fs::try_exists(&hash_file_path)
+                    .await
+                    .unwrap_or(false)
+                {
+                    if let Ok(content) = tokio::fs::read_to_string(&hash_file_path).await {
+                        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&content)
+                        {
+                            if merged.client_id.is_none() {
+                                merged.client_id = json_value
+                                    .get("clientId")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                            if merged.client_secret.is_none() {
+                                merged.client_secret = json_value
+                                    .get("clientSecret")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                            if merged.client_id.is_some() && merged.client_secret.is_some() {
+                                found_credentials = true;
                                 tracing::info!(
-                                    "[KIRO] Extra file {:?}: has_client_id={}, has_client_secret={}",
-                                    file_path.file_name(),
-                                    creds.client_id.is_some(),
-                                    creds.client_secret.is_some()
+                                    "[KIRO] 从 clientIdHash 文件补充: has_client_id={}, has_client_secret={}",
+                                    merged.client_id.is_some(),
+                                    merged.client_secret.is_some()
                                 );
-                                merge_credentials(&mut merged, &creds);
                             }
                         }
                     }
                 }
             }
+
+            // 方式2：如果没有 clientIdHash 或未找到，扫描目录中的其他 JSON 文件
+            if !found_credentials
+                && tokio::fs::try_exists(&aws_sso_cache_dir)
+                    .await
+                    .unwrap_or(false)
+            {
+                tracing::info!("[KIRO] 扫描 .aws/sso/cache 目录查找 client_id/client_secret");
+                if let Ok(mut entries) = tokio::fs::read_dir(&aws_sso_cache_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let file_path = entry.path();
+                        if file_path.extension().map(|e| e == "json").unwrap_or(false) {
+                            let file_name =
+                                file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            // 跳过主凭证文件和备份文件
+                            if file_name.starts_with("kiro-auth-token") {
+                                continue;
+                            }
+                            if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+                                if let Ok(json_value) =
+                                    serde_json::from_str::<serde_json::Value>(&content)
+                                {
+                                    let has_client_id = json_value
+                                        .get("clientId")
+                                        .and_then(|v| v.as_str())
+                                        .is_some();
+                                    let has_client_secret = json_value
+                                        .get("clientSecret")
+                                        .and_then(|v| v.as_str())
+                                        .is_some();
+                                    if has_client_id && has_client_secret {
+                                        merged.client_id = json_value
+                                            .get("clientId")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        merged.client_secret = json_value
+                                            .get("clientSecret")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        found_credentials = true;
+                                        tracing::info!(
+                                            "[KIRO] 从 {} 补充 client_id/client_secret",
+                                            file_name
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !found_credentials {
+                tracing::warn!("[KIRO] 未找到 client_id/client_secret，将使用 social 认证");
+            }
         }
 
         tracing::info!(
-            "[KIRO] Final merged from path: has_access={}, has_refresh={}, has_client_id={}, has_client_secret={}, auth_method={:?}",
+            "[KIRO] 最终凭证状态: has_access={}, has_refresh={}, has_client_id={}, has_client_secret={}, auth_method={:?}",
             merged.access_token.is_some(),
             merged.refresh_token.is_some(),
             merged.client_id.is_some(),
@@ -393,8 +430,22 @@ impl KiroProvider {
         format!("https://codewhisperer.{region}.amazonaws.com/generateAssistantResponse")
     }
 
-    /// 检查 Token 是否已过期（基于时间戳）
+    /// 检查 Token 是否已过期
+    ///
+    /// 支持两种格式：
+    /// - RFC3339 格式（新格式，与 CLIProxyAPI 兼容）
+    /// - 时间戳格式（旧格式）
     pub fn is_token_expired(&self) -> bool {
+        // 优先检查 RFC3339 格式的过期时间（新格式）
+        if let Some(expire_str) = &self.credentials.expire {
+            if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expire_str) {
+                let now = chrono::Utc::now();
+                // 提前5分钟判断为过期，避免边界情况
+                return expires <= now + chrono::Duration::minutes(5);
+            }
+        }
+
+        // 兼容旧的时间戳格式
         if let Some(expires_str) = &self.credentials.expires_at {
             if let Ok(expires_timestamp) = expires_str.parse::<i64>() {
                 let now = std::time::SystemTime::now()
@@ -600,6 +651,20 @@ impl KiroProvider {
             self.credentials.profile_arn = Some(arn.to_string());
         }
 
+        // 更新过期时间（如果响应中包含）
+        if let Some(expires_in) = data["expiresIn"]
+            .as_i64()
+            .or_else(|| data["expires_in"].as_i64())
+        {
+            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
+            self.credentials.expire = Some(expires_at.to_rfc3339());
+            // 同时更新旧格式以保持兼容
+            self.credentials.expires_at = Some(expires_at.timestamp().to_string());
+        }
+
+        // 更新最后刷新时间（RFC3339 格式）
+        self.credentials.last_refresh = Some(chrono::Utc::now().to_rfc3339());
+
         // 保存更新后的凭证到文件
         self.save_credentials().await?;
 
@@ -633,6 +698,15 @@ impl KiroProvider {
             existing["profileArn"] = serde_json::json!(arn);
         }
 
+        // 添加统一凭证格式字段（与 CLIProxyAPI 兼容）
+        existing["type"] = serde_json::json!(self.credentials.cred_type);
+        if let Some(expire) = &self.credentials.expire {
+            existing["expire"] = serde_json::json!(expire);
+        }
+        if let Some(last_refresh) = &self.credentials.last_refresh {
+            existing["lastRefresh"] = serde_json::json!(last_refresh);
+        }
+
         // 写回文件
         let content = serde_json::to_string_pretty(&existing)?;
         tokio::fs::write(&path, content).await?;
@@ -641,12 +715,35 @@ impl KiroProvider {
     }
 
     /// 检查 token 是否即将过期（10 分钟内）
+    ///
+    /// 支持两种格式：
+    /// - RFC3339 格式（新格式，与 CLIProxyAPI 兼容）
+    /// - 时间戳格式（旧格式）
     pub fn is_token_expiring_soon(&self) -> bool {
+        // 优先检查 RFC3339 格式的过期时间（新格式）
+        if let Some(expire_str) = &self.credentials.expire {
+            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expire_str) {
+                let now = chrono::Utc::now();
+                let threshold = now + chrono::Duration::minutes(10);
+                return expiry < threshold;
+            }
+        }
+
+        // 兼容旧格式（expires_at 可能是 RFC3339 或时间戳）
         if let Some(expires_at) = &self.credentials.expires_at {
+            // 尝试解析为 RFC3339
             if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expires_at) {
                 let now = chrono::Utc::now();
                 let threshold = now + chrono::Duration::minutes(10);
                 return expiry < threshold;
+            }
+            // 尝试解析为时间戳
+            if let Ok(expires_timestamp) = expires_at.parse::<i64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                return now >= (expires_timestamp - 600); // 10 分钟 = 600 秒
             }
         }
         // 如果没有过期时间，假设不需要刷新
@@ -761,6 +858,9 @@ fn merge_credentials(target: &mut KiroCredentials, source: &KiroCredentials) {
     if source.expires_at.is_some() {
         target.expires_at = source.expires_at.clone();
     }
+    if source.expire.is_some() {
+        target.expire = source.expire.clone();
+    }
     if source.region.is_some() {
         target.region = source.region.clone();
     }
@@ -770,4 +870,8 @@ fn merge_credentials(target: &mut KiroCredentials, source: &KiroCredentials) {
     if source.client_id_hash.is_some() {
         target.client_id_hash = source.client_id_hash.clone();
     }
+    if source.last_refresh.is_some() {
+        target.last_refresh = source.last_refresh.clone();
+    }
+    // cred_type 使用默认值，不需要合并
 }
