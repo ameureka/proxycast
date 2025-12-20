@@ -23,6 +23,9 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             name: macOS-arm64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            name: macOS-x64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             name: Windows-x64
@@ -73,6 +76,7 @@ jobs:
             
             ### Downloads
             - **macOS (Apple Silicon)**: `proxycast_*_aarch64.dmg`
+            - **macOS (Intel)**: `proxycast_*_x64.dmg`
             - **Windows (64-bit)**: `proxycast_*_x64-setup.exe`
             
             ### macOS 首次安装

@@ -3,6 +3,7 @@ import { X, ExternalLink, Wand2, Eye, EyeOff } from "lucide-react";
 import { Provider, AppType } from "@/lib/api/switch";
 import { getConfig } from "@/hooks/useTauri";
 import { cn } from "@/lib/utils";
+import { ProviderIcon } from "@/icons/providers";
 
 interface ProviderFormProps {
   appType: AppType;
@@ -344,7 +345,6 @@ export function ProviderForm({
   const generateJsonFromFields = useCallback(() => {
     const env: Record<string, string> = {};
     if (apiKey) {
-      env.ANTHROPIC_AUTH_TOKEN = apiKey;
       env.ANTHROPIC_API_KEY = apiKey;
     }
     if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
@@ -666,10 +666,7 @@ export function ProviderForm({
                               : "border-border hover:border-muted-foreground/50",
                           )}
                         >
-                          <span
-                            className="w-4 h-4 rounded"
-                            style={{ backgroundColor: preset.iconColor }}
-                          />
+                          <ProviderIcon providerType={preset.id} size={16} />
                           {preset.name}
                         </button>
                       ))}

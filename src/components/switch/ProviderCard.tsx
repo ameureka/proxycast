@@ -1,6 +1,39 @@
 import { Check, Edit2, Trash2, Zap } from "lucide-react";
 import { Provider } from "@/lib/api/switch";
 import { cn } from "@/lib/utils";
+import { ProviderIcon } from "@/icons/providers";
+
+// 从供应商名称和分类推断图标类型
+function getProviderTypeFromName(name: string, category: string): string {
+  const lowerName = name.toLowerCase();
+
+  // 精确匹配
+  if (lowerName.includes("智谱") || lowerName.includes("glm")) return "zhipu";
+  if (lowerName.includes("proxycast")) return "proxycast";
+  if (lowerName.includes("deepseek")) return "deepseek";
+  if (lowerName.includes("kimi")) return "kimi";
+  if (lowerName.includes("minimax")) return "minimax";
+  if (lowerName.includes("doubao") || lowerName.includes("豆包"))
+    return "doubao";
+  if (lowerName.includes("qwen") || lowerName.includes("通义")) return "qwen";
+  if (lowerName.includes("claude")) return "claude";
+  if (lowerName.includes("anthropic")) return "anthropic";
+  if (lowerName.includes("openai")) return "openai";
+  if (lowerName.includes("gemini")) return "gemini";
+  if (lowerName.includes("google")) return "google";
+  if (lowerName.includes("kiro")) return "kiro";
+  if (lowerName.includes("azure")) return "azure";
+  if (lowerName.includes("alibaba") || lowerName.includes("阿里"))
+    return "alibaba";
+  if (lowerName.includes("copilot")) return "copilot";
+
+  // 根据分类推断
+  if (category === "custom") return "custom";
+  if (category === "proxy") return "amp";
+
+  // 默认回退
+  return lowerName.replace(/\s+/g, "");
+}
 
 interface ProviderCardProps {
   provider: Provider;
@@ -34,11 +67,15 @@ export function ProviderCard({
 
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2">
-          <div
-            className="h-8 w-8 rounded-lg flex items-center justify-center text-lg"
-            style={{ backgroundColor: provider.icon_color || "#6366f1" }}
-          >
-            {provider.icon || provider.name.charAt(0).toUpperCase()}
+          <div className="h-8 w-8 rounded-lg flex items-center justify-center">
+            <ProviderIcon
+              providerType={getProviderTypeFromName(
+                provider.name,
+                provider.category || "",
+              )}
+              size={24}
+              showFallback={true}
+            />
           </div>
           <div>
             <h3 className="font-medium">{provider.name}</h3>

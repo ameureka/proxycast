@@ -19,6 +19,7 @@ import { getConfig, saveConfig, Config } from "@/hooks/useTauri";
 import { GeminiApiKeySection } from "./GeminiApiKeySection";
 import { VertexAISection } from "./VertexAISection";
 import { AmpConfigSection } from "./AmpConfigSection";
+import { ProviderIcon } from "@/icons/providers";
 import type {
   PoolProviderType,
   CredentialDisplay,
@@ -381,6 +382,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 }`}
               >
+                <ProviderIcon providerType={providerType} size={16} />
                 {providerLabels[providerType]}
                 {count > 0 && (
                   <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs">

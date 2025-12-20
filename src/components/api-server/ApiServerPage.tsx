@@ -15,6 +15,7 @@ import {
 import { LogsTab } from "./LogsTab";
 import { RoutesTab } from "./RoutesTab";
 import { HelpTip } from "@/components/HelpTip";
+import { ProviderIcon } from "@/icons/providers";
 import {
   startServer,
   stopServer,
@@ -260,7 +261,7 @@ export function ApiServerPage() {
       path: "/v1/chat/completions",
       needsAuth: true,
       body: JSON.stringify({
-        model: "claude-sonnet-4-5",
+        model: "claude-opus-4-5-20251101",
         messages: [{ role: "user", content: "Say hi in one word" }],
       }),
     },
@@ -271,7 +272,7 @@ export function ApiServerPage() {
       path: "/v1/messages",
       needsAuth: true,
       body: JSON.stringify({
-        model: "claude-sonnet-4-5",
+        model: "claude-opus-4-5-20251101",
         max_tokens: 100,
         messages: [
           {
@@ -555,12 +556,24 @@ export function ApiServerPage() {
             <div className="flex flex-wrap gap-2">
               {(
                 [
-                  { id: "kiro", label: "Kiro (AWS)" },
-                  { id: "gemini", label: "Gemini (Google)" },
-                  { id: "qwen", label: "Qwen (阿里)" },
-                  { id: "antigravity", label: "Antigravity (Gemini 3 Pro)" },
-                  { id: "openai", label: "OpenAI" },
-                  { id: "claude", label: "Claude (Anthropic)" },
+                  { id: "kiro", label: "Kiro (AWS)", iconType: "kiro" },
+                  {
+                    id: "gemini",
+                    label: "Gemini (Google)",
+                    iconType: "gemini",
+                  },
+                  { id: "qwen", label: "Qwen (阿里)", iconType: "qwen" },
+                  {
+                    id: "antigravity",
+                    label: "Antigravity (Gemini 3 Pro)",
+                    iconType: "gemini",
+                  },
+                  { id: "openai", label: "OpenAI", iconType: "openai" },
+                  {
+                    id: "claude",
+                    label: "Claude (Anthropic)",
+                    iconType: "claude",
+                  },
                 ] as const
               ).map((p) => {
                 const overview = poolOverview.find(
@@ -572,12 +585,13 @@ export function ApiServerPage() {
                     key={p.id}
                     onClick={() => handleSetDefaultProvider(p.id)}
                     disabled={loading}
-                    className={`rounded-lg px-4 py-2 text-sm font-medium ${
+                    className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium ${
                       defaultProvider === p.id
                         ? "bg-primary text-primary-foreground"
                         : "border hover:bg-muted"
                     } disabled:opacity-50`}
                   >
+                    <ProviderIcon providerType={p.iconType} size={16} />
                     {p.label}
                     {count > 0 && (
                       <span className="ml-1 text-xs opacity-70">({count})</span>

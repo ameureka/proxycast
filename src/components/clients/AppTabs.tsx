@@ -1,15 +1,36 @@
 import { cn } from "@/lib/utils";
 import { AppType } from "@/lib/api/switch";
+import { ProviderIcon } from "@/icons/providers";
 
 interface AppTabsProps {
   activeApp: AppType;
   onAppChange: (app: AppType) => void;
 }
 
-const apps: { id: AppType; label: string; description: string }[] = [
-  { id: "claude", label: "Claude Code", description: "Claude CLI 配置" },
-  { id: "codex", label: "Codex", description: "OpenAI Codex CLI" },
-  { id: "gemini", label: "Gemini", description: "Google Gemini CLI" },
+const apps: {
+  id: AppType;
+  label: string;
+  description: string;
+  iconType: string;
+}[] = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    description: "Claude CLI 配置",
+    iconType: "claude",
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    description: "OpenAI Codex CLI",
+    iconType: "openai",
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    description: "Google Gemini CLI",
+    iconType: "gemini",
+  },
 ];
 
 export function AppTabs({ activeApp, onAppChange }: AppTabsProps) {
@@ -20,13 +41,14 @@ export function AppTabs({ activeApp, onAppChange }: AppTabsProps) {
           key={app.id}
           onClick={() => onAppChange(app.id)}
           className={cn(
-            "px-4 py-2 rounded-t-lg text-sm font-medium transition-colors",
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg text-sm font-medium transition-colors",
             activeApp === app.id
               ? "bg-primary text-primary-foreground"
               : "hover:bg-muted text-muted-foreground",
           )}
           title={app.description}
         >
+          <ProviderIcon providerType={app.iconType} size={16} />
           {app.label}
         </button>
       ))}
