@@ -29,6 +29,9 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             name: Windows-x64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: Linux-x64
 
     runs-on: ${{ matrix.platform }}
     
@@ -41,6 +44,12 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -78,6 +87,7 @@ jobs:
             - **macOS (Apple Silicon)**: `proxycast_*_aarch64.dmg`
             - **macOS (Intel)**: `proxycast_*_x64.dmg`
             - **Windows (64-bit)**: `proxycast_*_x64-setup.exe`
+            - **Linux (64-bit)**: `proxycast_*_amd64.deb` / `proxycast_*_amd64.AppImage`
             
             ### macOS 首次安装
             
@@ -91,5 +101,4 @@ jobs:
             - **API Key**: proxycast-key
           releaseDraft: false
           prerelease: false
-          bundles: "dmg,nsis"
           args: --target ${{ matrix.target }}
