@@ -308,6 +308,13 @@ pub struct Config {
     /// 允许为不同的客户端端点（CC/Codex）配置不同的 Provider
     #[serde(default)]
     pub endpoint_providers: EndpointProvidersConfig,
+    /// 关闭时最小化到托盘（而不是退出应用）
+    #[serde(default = "default_minimize_to_tray")]
+    pub minimize_to_tray: bool,
+}
+
+fn default_minimize_to_tray() -> bool {
+    true
 }
 
 /// 服务器配置
@@ -771,6 +778,7 @@ impl Default for Config {
             proxy_url: None,
             ampcode: AmpConfig::default(),
             endpoint_providers: EndpointProvidersConfig::default(),
+            minimize_to_tray: default_minimize_to_tray(),
         }
     }
 }

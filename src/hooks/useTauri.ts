@@ -146,6 +146,8 @@ export interface Config {
   ampcode: AmpConfig;
   credential_pool: CredentialPoolConfig;
   proxy_url: string | null;
+  /** 关闭时最小化到托盘（而不是退出应用） */
+  minimize_to_tray: boolean;
 }
 
 export interface LogEntry {

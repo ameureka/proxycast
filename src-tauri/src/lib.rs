@@ -1687,6 +1687,31 @@ pub fn run() {
         .manage(bookmark_manager_state)
         .manage(enhanced_stats_service_state)
         .manage(batch_operations_state)
+        .on_window_event(move |window, event| {
+            // 处理窗口关闭事件
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 获取配置，检查是否启用最小化到托盘
+                let app_handle = window.app_handle();
+                if let Some(app_state) = app_handle.try_state::<AppState>() {
+                    // 使用 block_on 同步获取配置
+                    let minimize_to_tray = tauri::async_runtime::block_on(async {
+                        let state = app_state.read().await;
+                        state.config.minimize_to_tray
+                    });
+
+                    if minimize_to_tray {
+                        // 阻止默认关闭行为
+                        api.prevent_close();
+                        // 隐藏窗口而不是关闭
+                        if let Err(e) = window.hide() {
+                            tracing::error!("[窗口] 隐藏窗口失败: {}", e);
+                        } else {
+                            tracing::info!("[窗口] 窗口已最小化到托盘");
+                        }
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             // 初始化托盘管理器
             // Requirements 1.4: 应用启动时显示停止状态图标
