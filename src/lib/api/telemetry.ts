@@ -124,13 +124,6 @@ export interface TimeRangeParam {
   preset?: "1h" | "24h" | "7d" | "30d";
 }
 
-export interface DashboardData {
-  stats: StatsSummary;
-  tokens: TokenStatsSummary;
-  by_provider: Record<string, ProviderStats>;
-  recent_logs: RequestLog[];
-}
-
 // ========== 请求日志 API ==========
 
 export async function getRequestLogs(params?: {
@@ -196,10 +189,4 @@ export async function getTokenStatsByDay(
   days?: number,
 ): Promise<PeriodTokenStats[]> {
   return invoke("get_token_stats_by_day", { days });
-}
-
-// ========== 仪表盘 API ==========
-
-export async function getDashboardData(): Promise<DashboardData> {
-  return invoke("get_dashboard_data");
 }

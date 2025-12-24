@@ -2042,7 +2042,6 @@ pub fn run() {
             commands::telemetry_cmd::get_token_stats_by_provider,
             commands::telemetry_cmd::get_token_stats_by_model,
             commands::telemetry_cmd::get_token_stats_by_day,
-            commands::telemetry_cmd::get_dashboard_data,
             // Injection commands
             commands::injection_cmd::get_injection_config,
             commands::injection_cmd::set_injection_enabled,

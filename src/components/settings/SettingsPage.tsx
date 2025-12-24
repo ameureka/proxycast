@@ -7,14 +7,25 @@ import { AboutSection } from "./AboutSection";
 import { TlsSettings } from "./TlsSettings";
 import { QuotaSettings } from "./QuotaSettings";
 import { RemoteManagementSettings } from "./RemoteManagementSettings";
+import { ExtensionsSettings } from "./ExtensionsSettings";
+import { RoutingSettings } from "./RoutingSettings";
 
-type SettingsTab = "general" | "proxy" | "security" | "advanced" | "about";
+type SettingsTab =
+  | "general"
+  | "proxy"
+  | "security"
+  | "advanced"
+  | "extensions"
+  | "routing"
+  | "about";
 
 const tabs: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "通用" },
   { id: "proxy", label: "代理服务" },
   { id: "security", label: "安全" },
   { id: "advanced", label: "高级" },
+  { id: "extensions", label: "扩展" },
+  { id: "routing", label: "路由管理 (实验)" },
   { id: "about", label: "关于" },
 ];
 
@@ -65,6 +76,8 @@ export function SettingsPage() {
             <QuotaSettings />
           </div>
         )}
+        {activeTab === "extensions" && <ExtensionsSettings />}
+        {activeTab === "routing" && <RoutingSettings />}
         {activeTab === "about" && <AboutSection />}
       </div>
     </div>

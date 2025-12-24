@@ -1,21 +1,9 @@
-import {
-  LayoutDashboard,
-  Settings,
-  Globe,
-  Database,
-  Route,
-  FileCode,
-  Puzzle,
-  Activity,
-} from "lucide-react";
+import { Settings, Globe, Database, FileCode, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Page =
-  | "dashboard"
   | "provider-pool"
-  | "routing-management"
   | "config-management"
-  | "extensions"
   | "api-server"
   | "flow-monitor"
   | "settings";
@@ -26,12 +14,9 @@ interface SidebarProps {
 }
 
 const navItems = [
-  { id: "dashboard" as Page, label: "仪表盘", icon: LayoutDashboard },
-  { id: "provider-pool" as Page, label: "凭证池", icon: Database },
-  { id: "routing-management" as Page, label: "路由管理", icon: Route },
-  { id: "config-management" as Page, label: "配置管理", icon: FileCode },
-  { id: "extensions" as Page, label: "扩展", icon: Puzzle },
   { id: "api-server" as Page, label: "API Server", icon: Globe },
+  { id: "provider-pool" as Page, label: "凭证池", icon: Database },
+  { id: "config-management" as Page, label: "配置管理", icon: FileCode },
   { id: "flow-monitor" as Page, label: "Flow Monitor", icon: Activity },
   { id: "settings" as Page, label: "设置", icon: Settings },
 ];
